@@ -1,12 +1,36 @@
-# Python virtual environment
+# Virtual environment
 .venv/
+venv/
+env/
+ENV/
 
-# Python generated files
+# Python cache
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
 
-# Environment variables and secrets
+# Environment variables / secrets
 .env
+.env.*
+.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Chroma / local vector databases
+**/Chroma_DB/
 
 # Testing and tooling caches
 .pytest_cache/
