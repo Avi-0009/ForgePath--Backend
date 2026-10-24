@@ -1,20 +1,23 @@
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
-# Prevent Python from writing .pyc files and buffer stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+RUN python -m pip install \
+    --no-cache-dir \
+    --index-url https://pypi.org/simple \
+    --timeout 120 \
+    --retries 10 \
+    -r requirements.txt
+
 COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
 
-# Expose FastAPI port
 EXPOSE 8000
 
-# Run FastAPI with uvicorn
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

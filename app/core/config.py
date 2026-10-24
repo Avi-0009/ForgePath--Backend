@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     jwt_algorithm: Literal["HS256"] = "HS256"
     access_token_expire_minutes: int = 30
     cors_origins: str = "http://localhost:5173"
+
+    refresh_token_expire_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+    )
 
     @field_validator("jwt_secret_key")
     @classmethod

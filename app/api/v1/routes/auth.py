@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
@@ -19,7 +19,9 @@ from app.services.auth import (
     authenticate_user,
     register_user,
 )
-
+from app.repositories import user as user_repository
+from app.core.config import settings
+from app.services.auth_session import create_auth_session, rotate_auth_session, revoke_auth_session
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -49,6 +51,7 @@ async def signup(
 )
 async def login(
     payload: LoginRequest,
+    response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TokenResponse:
     try:
@@ -60,10 +63,47 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
+    auth_session = await create_auth_session(db, user.id)
+
+    access_token = create_access_token(
+        user_id=user.id,
+        session_id=auth_session.session.id,
+    )
+
+    response.set_cookie(
+        key="forgepath_refresh",
+        value=auth_session.refresh_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
+        path="/api/v1/auth",
+    )
+
     return TokenResponse(
-        access_token=create_access_token(user.id),
+        access_token=access_token,
         token_type="bearer",
         user=UserResponse.model_validate(user),
+    )
+
+@router.post("/logout", status_code=204)
+async def logout(
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    refresh_token: str | None = Cookie(
+        default=None,
+        alias="forgepath_refresh",
+    ),
+) -> None:
+    await revoke_auth_session(db, refresh_token)
+
+    # Remove the refresh-token cookie from the browser.
+    response.delete_cookie(
+        key="forgepath_refresh",
+        path="/api/v1/auth",
+        httponly=True,
+        secure=False,
+        samesite="lax",
     )
 
 
@@ -76,3 +116,57 @@ async def me(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> User:
     return current_user
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_access_token(
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    refresh_token: str | None = Cookie(
+        default=None,
+        alias="forgepath_refresh",
+    ),
+) -> TokenResponse:
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    if not refresh_token:
+        raise unauthorized
+
+    rotated = await rotate_auth_session(db, refresh_token)
+
+    if rotated is None:
+        raise unauthorized
+
+    user = await user_repository.get_by_id(
+        db,
+        rotated.session.user_id,
+    )
+
+    if user is None or not user.is_active:
+        await revoke_auth_session(db, rotated.refresh_token)
+        raise unauthorized
+
+    access_token = create_access_token(
+        user_id=user.id,
+        session_id=rotated.session.id,
+    )
+
+    response.set_cookie(
+        key="forgepath_refresh",
+        value=rotated.refresh_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
+        path="/api/v1/auth",
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=user,
+    )
