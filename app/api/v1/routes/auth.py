@@ -1,4 +1,5 @@
 from typing import Annotated
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,8 @@ from app.schemas.auth import (
     SignupRequest,
     TokenResponse,
     UserResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
 from app.services.auth import (
     AccountAlreadyExistsError,
@@ -22,6 +25,10 @@ from app.services.auth import (
 from app.repositories import user as user_repository
 from app.core.config import settings
 from app.services.auth_session import create_auth_session, rotate_auth_session, revoke_auth_session
+from app.services.brevo_email import BrevoEmailError
+from app.services.password_reset import request_password_reset_otp, reset_password_with_otp
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -86,7 +93,10 @@ async def login(
         user=UserResponse.model_validate(user),
     )
 
-@router.post("/logout", status_code=204)
+@router.post(
+    "/logout", 
+    status_code=204
+)
 async def logout(
     response: Response,
     db: AsyncSession = Depends(get_db),
@@ -118,7 +128,10 @@ async def me(
     return current_user
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh", 
+    response_model=TokenResponse
+)
 async def refresh_access_token(
     response: Response,
     db: AsyncSession = Depends(get_db),
@@ -170,3 +183,55 @@ async def refresh_access_token(
         token_type="bearer",
         user=user,
     )
+
+
+@router.post(
+    "/forgot-password",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str]:
+    try:
+        await request_password_reset_otp(
+            db=db,
+            email=str(payload.email),
+        )
+    except BrevoEmailError:
+        logger.exception(
+            "Brevo failed to send a password-reset email"
+        )
+
+    return {
+        "message": (
+            "If an account exists for that email, "
+            "a password reset code will be sent."
+        )
+    }
+
+
+@router.post("/reset-password")
+async def reset_password(
+    payload: ResetPasswordRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str]:
+    success = await reset_password_with_otp(
+        db=db,
+        email=str(payload.email),
+        otp=payload.otp,
+        new_password=payload.new_password,
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset code",
+        )
+
+    return {
+        "message": (
+            "Password reset successfully. "
+            "Please log in with your new password."
+        )
+    }

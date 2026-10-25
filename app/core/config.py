@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import SecretStr, field_validator, Field
+from pydantic import SecretStr, field_validator, Field, EmailStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,24 @@ class Settings(BaseSettings):
         default=7,
         ge=1,
         le=90,
+    )
+
+    # Brevo transactional email configuration
+    brevo_api_key: SecretStr
+    brevo_sender_email: EmailStr
+    brevo_sender_name: str = "ForgePath"
+
+    # Password reset OTP configuration
+    password_reset_secret_key: SecretStr
+    password_reset_otp_expire_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=30,
+    )
+    password_reset_otp_max_attempts: int = Field(
+        default=5,
+        ge=1,
+        le=10,
     )
 
     @field_validator("jwt_secret_key")
