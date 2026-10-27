@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
 
 class CodePatchRequest(BaseModel):
@@ -62,3 +63,33 @@ class CodePatchResponse(BaseModel):
     diff: str
     proposed_code: str
     patch_applied: bool = False
+
+
+class CodePatchApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_root: str = Field(min_length=1, max_length=1024)
+    relative_path: str = Field(min_length=1, max_length=1024)
+
+    expected_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$"
+    )
+    proposed_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$"
+    )
+
+    proposed_code: str = Field(
+        min_length=1,
+        max_length=1_000_000,
+    )
+
+    # Applying a patch requires an explicit approval value.
+    approval: Literal["apply"]
+
+
+class CodePatchApplyResponse(BaseModel):
+    relative_path: str
+    original_sha256: str
+    applied_sha256: str
+    backup_id: str
+    patch_applied: bool
