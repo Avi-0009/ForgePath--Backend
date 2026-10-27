@@ -23,6 +23,7 @@ from app.services.workspace import (
     WorkspaceReadError,
     read_configured_workspace_file,
 )
+from app.services.local_context import LocalContextError, get_project_instructions
 
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,27 @@ async def review_local_file(
     )
 
     try:
-        review = await review_code(review_request)
+        project_context = await get_project_instructions(
+            project_root=payload.workspace_root,
+        )
+    except LocalContextError:
+        logger.exception(
+            "Failed to retrieve saved project instructions."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retrieve saved project context.",
+        ) from None
+
+    try:
+        review = await review_code(
+            review_request,
+            project_instructions=(
+                project_context.instructions
+                if project_context is not None
+                else None
+            ),
+        )
 
     except AIProviderError as exc:
         logger.warning("AI provider failed during local-file review.")
