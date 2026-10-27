@@ -57,5 +57,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    workspace_allowed_roots: str = ""
+
+    @property
+    def workspace_root_list(self) -> list[str]:
+        return [
+            root.strip()
+            for root in self.workspace_allowed_roots.split(";")
+            if root.strip()
+        ]
+
 
 settings = Settings()
