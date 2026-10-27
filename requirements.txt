@@ -9,3 +9,4 @@ pwdlib[argon2]>=0.2.1
 PyJWT>=2.8.0
 email-validator>=2.2.0
 httpx>=0.27.0
+aiosqlite>=0.20.0
