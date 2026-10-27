@@ -1,4 +1,7 @@
+import os
+import stat
 import hashlib
+
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Sequence
@@ -94,6 +97,10 @@ class WorkspaceBinaryFile(WorkspaceReadError):
     """The selected file is not valid UTF-8 text."""
 
 
+class WorkspaceConfigurationError(WorkspaceReadError):
+    """The configured workspace allowlist is invalid."""
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceFile:
     """Read-only result containing the selected file's contents."""
@@ -165,9 +172,12 @@ def _validate_relative_path(relative_path: str) -> tuple[str, ...]:
             "Environment files cannot be reviewed."
         )
 
+    file_path = Path(filename)
+
     if (
         filename in SENSITIVE_FILENAMES
-        or Path(filename).suffix.lower() in SENSITIVE_SUFFIXES
+        or file_path.stem.lower() in SENSITIVE_FILENAMES
+        or file_path.suffix.lower() in SENSITIVE_SUFFIXES
     ):
         raise WorkspaceAccessDenied(
             "This potentially sensitive file cannot be reviewed."
@@ -201,11 +211,23 @@ def read_workspace_file(
         )
 
     # Require explicit approval for each workspace root.
-    allowed_roots = {
-        resolved
-        for candidate in allowed_workspace_roots
-        if (resolved := _resolve_directory(candidate)) is not None
-    }
+    if not allowed_workspace_roots:
+        raise WorkspaceConfigurationError(
+            "No allowed workspace roots are configured."
+        )
+
+    allowed_roots: set[Path] = set()
+
+    for candidate in allowed_workspace_roots:
+        resolved = _resolve_directory(candidate)
+
+        if resolved is None:
+            raise WorkspaceConfigurationError(
+                "A configured workspace root is invalid or unavailable. "
+                "Check WORKSPACE_ALLOWED_ROOTS in your backend configuration."
+            )
+
+        allowed_roots.add(resolved)
 
     if root not in allowed_roots:
         raise WorkspaceAccessDenied(
@@ -238,14 +260,53 @@ def read_workspace_file(
     resolved_parts = resolved_target.relative_to(root).parts
     _validate_relative_path("/".join(resolved_parts))
 
+    
     try:
-        if resolved_target.stat().st_size > max_bytes:
-            raise WorkspaceFileTooLarge(
-                f"Files larger than {max_bytes} bytes are not supported."
-            )
-
-        # Read no more than max_bytes + 1, even if the file grows.
         with resolved_target.open("rb") as file:
+            # Inspect the file descriptor actually opened.
+            opened_stat = os.fstat(file.fileno())
+
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise WorkspaceInvalidPath(
+                    "The selected path is not a regular file."
+                )
+
+            # Re-resolve and validate the path after opening.
+            try:
+                opened_path = resolved_target.resolve(strict=True)
+
+                if not _is_relative_to(opened_path, root):
+                    raise WorkspaceAccessDenied(
+                        "The opened file is outside the selected workspace."
+                    )
+
+                opened_parts = opened_path.relative_to(root).parts
+                _validate_relative_path("/".join(opened_parts))
+
+                path_stat = opened_path.stat()
+
+            except WorkspaceReadError:
+                raise
+            except (OSError, RuntimeError, ValueError):
+                raise WorkspaceAccessDenied(
+                    "The file path changed during validation. Retry the request."
+                ) from None
+
+            # Ensure the pathname still identifies the opened file.
+            if (
+                opened_stat.st_dev != path_stat.st_dev
+                or opened_stat.st_ino != path_stat.st_ino
+            ):
+                raise WorkspaceAccessDenied(
+                    "The file changed during validation. Retry the request."
+                )
+
+            if opened_stat.st_size > max_bytes:
+                raise WorkspaceFileTooLarge(
+                    f"Files larger than {max_bytes} bytes are not supported."
+                )
+
+            # Read only after the post-open checks have passed.
             raw_content = file.read(max_bytes + 1)
 
     except WorkspaceReadError:
@@ -254,6 +315,7 @@ def read_workspace_file(
         raise WorkspaceReadError(
             "The requested file could not be read."
         ) from None
+
 
     if len(raw_content) > max_bytes:
         raise WorkspaceFileTooLarge(

@@ -1,11 +1,10 @@
-
 import hashlib
-
 import pytest
 
 from app.services.workspace import (
     WorkspaceAccessDenied,
     WorkspaceBinaryFile,
+    WorkspaceConfigurationError,
     WorkspaceFileTooLarge,
     WorkspaceInvalidPath,
     read_workspace_file,
@@ -149,4 +148,23 @@ def test_rejects_file_outside_workspace_via_symlink(tmp_path):
             workspace_root=root,
             relative_path="linked.txt",
             allowed_workspace_roots=[root],
+        )
+
+
+def test_rejects_invalid_configured_workspace_root(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+
+    (root / "main.py").write_text(
+        "print('hello')",
+        encoding="utf-8",
+    )
+
+    missing_root = tmp_path / "missing-project"
+
+    with pytest.raises(WorkspaceConfigurationError):
+        read_workspace_file(
+            workspace_root=root,
+            relative_path="main.py",
+            allowed_workspace_roots=[root, missing_root],
         )

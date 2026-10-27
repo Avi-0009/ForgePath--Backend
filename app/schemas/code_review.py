@@ -98,3 +98,45 @@ class CodeReviewResponse(BaseModel):
     findings: list[ReviewFinding] = Field(default_factory=list)
     strengths: list[str] = Field(default_factory=list)
     suggested_tests: list[str] = Field(default_factory=list)
+
+
+class CodeReviewFileRequest(BaseModel):
+    """Request to review a file within an allowed workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_root: str = Field(
+        min_length=1,
+        max_length=1024,
+        description="A configured, allowlisted workspace directory."
+    )
+
+    relative_path: str = Field(
+        min_length=1,
+        max_length=1024,
+        description="File path relative to the workspace root."
+    )
+
+    review_mode: ReviewMode = "general"
+
+    task_description: str | None = Field(
+        default=None,
+        max_length=10_000
+    )
+
+    additional_context: str | None = Field(
+        default=None,
+        max_length=12_000
+    )
+
+
+class CodeReviewFileResponse(BaseModel):
+    """Review result and metadata for a local file."""
+
+    relative_path: str
+    language: str | None
+    sha256: str
+    size_bytes: int = Field(ge=0)
+    line_count: int = Field(ge=0)
+
+    review: CodeReviewResponse

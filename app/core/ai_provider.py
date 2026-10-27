@@ -13,7 +13,7 @@ NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 NVIDIA_ENABLE_THINKING = True
 NVIDIA_MAX_TOKENS = 16384
 
-REQUEST_TIMEOUT_SECONDS = 90
+REQUEST_TIMEOUT_SECONDS = 240
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 # HUGGINGFACE_CHAT_URL = "https://router.huggingface.co/v1/chat/completions"
