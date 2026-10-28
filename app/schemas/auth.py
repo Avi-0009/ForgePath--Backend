@@ -91,3 +91,12 @@ class ResetPasswordRequest(BaseModel):
     @classmethod
     def normalize_email(cls, value: object) -> object:
         return value.strip().lower() if isinstance(value, str) else value
+
+
+class EmailVerificationOTPRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    otp: str = Field(
+        pattern=r"^[0-9]{6}$",
+        description="The six-digit email verification code",
+    )

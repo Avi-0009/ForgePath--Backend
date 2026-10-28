@@ -15,6 +15,7 @@ from app.schemas.auth import (
     UserResponse,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    EmailVerificationOTPRequest,
 )
 from app.services.auth import (
     AccountAlreadyExistsError,
@@ -27,6 +28,14 @@ from app.core.config import settings
 from app.services.auth_session import create_auth_session, rotate_auth_session, revoke_auth_session
 from app.services.brevo_email import BrevoEmailError
 from app.services.password_reset import request_password_reset_otp, reset_password_with_otp
+from app.services.email_verification import (
+    EmailAlreadyVerifiedError,
+    EmailVerificationRateLimitedError,
+    EmailVerificationUserError,
+    request_email_verification_otp,
+    verify_email_with_otp,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -235,3 +244,90 @@ async def reset_password(
             "Please log in with your new password."
         )
     }
+
+
+
+@router.post(
+    "/email-verification/request",
+    status_code=status.HTTP_200_OK,
+)
+async def request_email_verification(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str]:
+    """Send an OTP to the authenticated user's registered email."""
+    try:
+        await request_email_verification_otp(
+            db=db,
+            user_id=current_user.id,
+        )
+
+        return {
+            "message": "Verification code sent to your email address."
+        }
+
+    except EmailAlreadyVerifiedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    except EmailVerificationRateLimitedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+            headers={"Retry-After": "60"},
+        ) from exc
+
+    except EmailVerificationUserError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except BrevoEmailError as exc:
+        logger.exception("Failed to send an email-verification OTP")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not send the verification email. Please try again later.",
+        ) from exc
+
+
+@router.post(
+    "/email-verification/verify",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def verify_email(
+    payload: EmailVerificationOTPRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Verify the authenticated user's email using a six-digit OTP."""
+    try:
+        success = await verify_email_with_otp(
+            db=db,
+            user_id=current_user.id,
+            otp=payload.otp,
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification code.",
+            )
+
+        # Reload persisted fields so the response reflects PostgreSQL.
+        await db.refresh(current_user)
+
+        return current_user
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        logger.exception("Failed to verify the authenticated user's email")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Email verification could not be completed.",
+        ) from exc
