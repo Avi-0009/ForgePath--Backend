@@ -30,6 +30,7 @@ SENSITIVE_FILENAMES = {
     "service-account.json",
     "id_rsa",
     "id_ed25519",
+    "pgadmin-servers.json",
 }
 
 SENSITIVE_SUFFIXES = {
