@@ -12,6 +12,25 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     cors_origins: str = "http://localhost:5173"
 
+    # Workspace embedding configuration
+    embedding_provider: Literal["openai"] | None = None
+
+    openai_api_key: SecretStr | None = None
+
+    embedding_model: str = "text-embedding-3-small"
+
+    embedding_dimensions: int = Field(
+        default=1536,
+        ge=1,
+        le=1536,
+    )
+
+    embedding_batch_size: int = Field(
+        default=32,
+        ge=1,
+        le=128,
+    )
+
     refresh_token_expire_days: int = Field(
         default=7,
         ge=1,

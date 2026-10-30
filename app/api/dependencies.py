@@ -4,7 +4,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.repositories import user as user_repository
 from app.repositories.auth_session import get_session_by_id
+from app.services.workspace_indexing import WorkspaceIndexingService
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -71,3 +72,31 @@ async def get_current_user(
         raise unauthorized
 
     return user
+
+
+def get_workspace_indexing_service(
+    request: Request,
+) -> WorkspaceIndexingService:
+    """
+    Retrieve the application-level workspace indexing service.
+
+    The service is initialized during FastAPI lifespan startup.
+    Return 503 until an embedding provider has been configured.
+    """
+
+    indexing_service = getattr(
+        request.app.state,
+        "workspace_indexing_service",
+        None,
+    )
+
+    if indexing_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Workspace semantic indexing is not configured. "
+                "Configure an embedding provider before using this endpoint."
+            ),
+        )
+
+    return indexing_service

@@ -120,6 +120,19 @@ def _resolve_allowed_workspace_root(
     return root
 
 
+def resolve_allowed_workspace_root(
+    workspace_root: str | Path,
+) -> Path:
+    """
+    Public interface for validating and resolving an allowed workspace.
+
+    Requires an exact match against configured workspace roots.
+    Returns the canonical resolved workspace path.
+    """
+
+    return _resolve_allowed_workspace_root(workspace_root)
+
+
 def _is_ingestable_file(path: Path) -> bool:
     """Accept supported source, configuration, and documentation files."""
 

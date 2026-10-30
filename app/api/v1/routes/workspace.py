@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, get_workspace_indexing_service
 from app.models.user import User
 
 from app.schemas.workspace import WorkspaceNode
@@ -14,6 +14,16 @@ from app.schemas.workspace_context import (
     WorkspaceContextResponse,
     WorkspaceDocumentSummary,
 )
+from app.schemas.workspace_indexing import (
+    WorkspaceIndexRequest,
+    WorkspaceIndexResponse,
+    WorkspaceSearchRequest,
+    WorkspaceSearchResponse,
+    WorkspaceSearchHitResponse,
+)
+
+from app.services.embedding_service import EmbeddingError
+from app.services.vector_store import VectorStoreError
 
 from app.services.workspace import (
     WorkspaceAccessDenied,
@@ -23,6 +33,17 @@ from app.services.workspace import (
 
 from app.services.workspace_tree import get_workspace_tree
 from app.services.workspace_context import build_workspace_context
+
+from app.services.workspace_ingestion import (
+    ingest_workspace,
+    resolve_allowed_workspace_root,
+)
+
+from app.services.workspace_indexing import (
+    WorkspaceIndexingConfigurationError,
+    WorkspaceIndexingError,
+    WorkspaceIndexingService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -158,3 +179,204 @@ async def prepare_workspace_context(
         truncated=context.truncated,
         documents=documents,
     )
+
+
+@router.post(
+    "/index",
+    response_model=WorkspaceIndexResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def index_workspace(
+    payload: WorkspaceIndexRequest,
+    _current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+    indexing_service: Annotated[
+        WorkspaceIndexingService,
+        Depends(get_workspace_indexing_service),
+    ],
+) -> WorkspaceIndexResponse:
+    """
+    Ingest and semantically index an allowlisted workspace.
+
+    Pipeline:
+        Workspace ingestion
+        -> Chunking
+        -> Embedding generation
+        -> ChromaDB persistence
+    """
+
+    try:
+        # Safely read supported workspace documents.
+        ingestion = await asyncio.to_thread(
+            ingest_workspace,
+            payload.workspace_root,
+        )
+
+        # Generate embeddings and persist the resulting chunks.
+        result = await indexing_service.index_documents(
+            ingestion.documents
+        )
+
+        return WorkspaceIndexResponse(
+            files_processed=result.files_processed,
+            chunks_processed=result.chunks_processed,
+            vectors_upserted=result.vectors_upserted,
+            stale_vectors_deleted=result.stale_vectors_deleted,
+            empty_files=result.empty_files,
+            files_scanned=ingestion.files_scanned,
+            files_skipped=ingestion.files_skipped,
+            total_bytes=ingestion.total_bytes,
+            truncated=ingestion.truncated,
+        )
+
+    except WorkspaceConfigurationError as exc:
+        logger.error("Workspace configuration error: %s", exc)
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace configuration is invalid or unavailable.",
+        ) from exc
+
+    except WorkspaceAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceReadError:
+        logger.exception("Workspace ingestion failed")
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The workspace could not be safely ingested.",
+        ) from None
+
+    except WorkspaceIndexingConfigurationError as exc:
+        logger.error("Workspace indexing configuration error: %s", exc)
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Workspace indexing is not correctly configured.",
+        ) from exc
+
+    except EmbeddingError:
+        logger.exception("Embedding provider failed during indexing")
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The embedding provider could not process the workspace.",
+        ) from None
+
+    except (VectorStoreError, WorkspaceIndexingError):
+        logger.exception("Workspace vector indexing failed")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not index the workspace.",
+        ) from None
+
+    except Exception:
+        logger.exception("Unexpected workspace indexing failure")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace indexing failed unexpectedly.",
+        ) from None
+
+
+@router.post(
+    "/search",
+    response_model=WorkspaceSearchResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def search_workspace(
+    payload: WorkspaceSearchRequest,
+    _current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+    indexing_service: Annotated[
+        WorkspaceIndexingService,
+        Depends(get_workspace_indexing_service),
+    ],
+) -> WorkspaceSearchResponse:
+    """
+    Perform semantic search within one allowlisted workspace.
+
+    Results include source paths, line ranges, and matching code chunks.
+    """
+
+    try:
+        # Resolve the workspace against the configured allowlist.
+        workspace_root = await asyncio.to_thread(
+            resolve_allowed_workspace_root,
+            payload.workspace_root,
+        )
+
+        hits = await indexing_service.search(
+            payload.query,
+            top_k=payload.top_k,
+            workspace_root=str(workspace_root),
+            relative_path=payload.relative_path,
+            language=payload.language,
+        )
+
+        results = [
+            WorkspaceSearchHitResponse(
+                relative_path=hit.metadata["relative_path"],
+                language=hit.metadata["language"],
+                chunk_index=hit.metadata["chunk_index"],
+                start_line=hit.metadata["start_line"],
+                end_line=hit.metadata["end_line"],
+                content=hit.document,
+                distance=hit.distance,
+            )
+            for hit in hits
+        ]
+
+        return WorkspaceSearchResponse(
+            workspace_root=str(workspace_root),
+            query=payload.query,
+            result_count=len(results),
+            results=results,
+        )
+
+    except WorkspaceConfigurationError as exc:
+        logger.error("Workspace configuration error: %s", exc)
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace configuration is invalid or unavailable.",
+        ) from exc
+
+    except WorkspaceAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except EmbeddingError:
+        logger.exception("Embedding provider failed during semantic search")
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The embedding provider could not process the query.",
+        ) from None
+
+    except (VectorStoreError, WorkspaceIndexingError):
+        logger.exception("Workspace semantic search failed")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not search the workspace.",
+        ) from None
+
+    except Exception:
+        logger.exception("Unexpected workspace search failure")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace semantic search failed unexpectedly.",
+        ) from None
