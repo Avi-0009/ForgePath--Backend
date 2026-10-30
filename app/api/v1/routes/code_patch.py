@@ -25,8 +25,10 @@ from app.services.code_patch_apply import (
 )
 from app.services.workspace import (
     WorkspaceAccessDenied,
+    WorkspaceBinaryFile,
     WorkspaceConfigurationError,
     WorkspaceFileNotFound,
+    WorkspaceFileTooLarge,
     WorkspaceInvalidPath,
     WorkspaceReadError,
 )
@@ -41,6 +43,7 @@ router = APIRouter(
 )
 
 
+
 @router.post(
     "",
     response_model=CodePatchResponse,
@@ -53,9 +56,7 @@ async def create_code_patch(
         Depends(get_current_user),
     ],
 ) -> CodePatchResponse:
-    """
-    Generate a proposed code fix without modifying the source file.
-    """
+    """Generate a proposed code fix without modifying the source file."""
 
     try:
         return await generate_code_patch(payload)
@@ -65,6 +66,52 @@ async def create_code_patch(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+
+    except WorkspaceConfigurationError as exc:
+        logger.error("Patch generation workspace configuration error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace configuration is invalid or unavailable.",
+        ) from exc
+
+    except WorkspaceAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceInvalidPath as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceFileNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceFileTooLarge as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceBinaryFile as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceReadError:
+        logger.exception(
+            "Failed to read a workspace file during patch generation."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The requested file could not be read.",
+        ) from None
 
     except AIProviderError as exc:
         logger.warning("AI provider failed during patch generation.")
@@ -86,6 +133,7 @@ async def create_code_patch(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Patch generation failed unexpectedly.",
         ) from None
+
 
 
 @router.post(
