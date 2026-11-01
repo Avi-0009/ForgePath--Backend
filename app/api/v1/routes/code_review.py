@@ -1,8 +1,7 @@
-
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.dependencies import get_current_user
 from app.core.ai_provider import AIProviderError
@@ -24,6 +23,9 @@ from app.services.workspace import (
     read_configured_workspace_file,
 )
 from app.services.local_context import LocalContextError, get_project_instructions
+from app.services.workspace_review_context import (
+    WorkspaceReviewContextBuilder,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -80,6 +82,7 @@ async def create_code_review(
 )
 async def review_local_file(
     payload: CodeReviewFileRequest,
+    request: Request,
     _current_user: Annotated[
         User,
         Depends(get_current_user),
@@ -164,6 +167,53 @@ async def review_local_file(
             detail="Could not retrieve saved project context.",
         ) from None
 
+    # Retrieve optional semantic workspace context.
+    related_workspace_context = None
+
+    indexing_service = getattr(
+        request.app.state,
+        "workspace_indexing_service",
+        None,
+    )
+
+    if indexing_service is not None:
+        try:
+            context_builder = WorkspaceReviewContextBuilder(
+                indexing_service=indexing_service,
+            )
+
+            workspace_context = await context_builder.build(
+                workspace_root=payload.workspace_root,
+                relative_path=source.relative_path,
+                source_content=source.content,
+                language=source.language,
+            )
+
+            if not workspace_context.is_empty:
+                related_workspace_context = (
+                    workspace_context.to_prompt_text()
+                )
+
+                logger.info(
+                    "Retrieved %d verified workspace context chunks "
+                    "(%d characters) for code review.",
+                    workspace_context.chunk_count,
+                    workspace_context.total_chars,
+                )
+
+            else:
+                logger.debug(
+                    "No verified related workspace context was found."
+                )
+
+        except Exception:
+            # RAG is an optional enhancement. A retrieval failure
+            # must not prevent ordinary code review.
+            logger.exception(
+                "Workspace context retrieval failed. "
+                "Continuing without RAG context."
+            )
+
     try:
         review = await review_code(
             review_request,
@@ -172,6 +222,7 @@ async def review_local_file(
                 if project_context is not None
                 else None
             ),
+            related_workspace_context=related_workspace_context,
         )
 
     except AIProviderError as exc:

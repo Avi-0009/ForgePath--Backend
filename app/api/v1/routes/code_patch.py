@@ -1,7 +1,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 
 from app.api.dependencies import get_current_user
 from app.core.ai_provider import AIProviderError
@@ -31,6 +31,10 @@ from app.services.workspace import (
     WorkspaceFileTooLarge,
     WorkspaceInvalidPath,
     WorkspaceReadError,
+    read_configured_workspace_file,
+)
+from app.services.workspace_review_context import (
+    WorkspaceReviewContextBuilder,
 )
 
 
@@ -51,6 +55,7 @@ router = APIRouter(
 )
 async def create_code_patch(
     payload: CodePatchRequest,
+    request: Request,
     _current_user: Annotated[
         User,
         Depends(get_current_user),
@@ -59,7 +64,59 @@ async def create_code_patch(
     """Generate a proposed code fix without modifying the source file."""
 
     try:
-        return await generate_code_patch(payload)
+        related_workspace_context = None
+
+        indexing_service = getattr(
+            request.app.state,
+            "workspace_indexing_service",
+            None,
+        )
+
+        if indexing_service is not None:
+
+            # Read the selected source safely to construct the retrieval query.
+            source = read_configured_workspace_file(
+                workspace_root=payload.workspace_root,
+                relative_path=payload.relative_path,
+            )
+
+            # Retrieve verified related workspace code.
+            try:
+                context_builder = WorkspaceReviewContextBuilder(
+                    indexing_service=indexing_service,
+                )
+
+                workspace_context = await context_builder.build(
+                    workspace_root=payload.workspace_root,
+                    relative_path=source.relative_path,
+                    source_content=source.content,
+                    language=source.language,
+                )
+
+                if not workspace_context.is_empty:
+                    related_workspace_context = (
+                        workspace_context.to_prompt_text()
+                    )
+
+                    logger.info(
+                        "Retrieved %d verified workspace context chunks "
+                        "(%d characters) for patch generation.",
+                        workspace_context.chunk_count,
+                        workspace_context.total_chars,
+                    )
+
+            except Exception:
+                # Retrieval is optional. Patch generation can continue
+                # using the selected source and saved project instructions.
+                logger.exception(
+                    "Workspace context retrieval failed. "
+                    "Continuing without RAG context."
+                )
+
+        return await generate_code_patch(
+            payload,
+            related_workspace_context=related_workspace_context,
+        )
 
     except StaleSourceFileError as exc:
         raise HTTPException(

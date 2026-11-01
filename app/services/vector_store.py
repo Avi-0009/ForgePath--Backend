@@ -471,6 +471,7 @@ class ChromaVectorStore:
                 "Could not delete workspace vectors."
             ) from exc
 
+    
     def search(
         self,
         query_embedding: Sequence[float],
@@ -479,12 +480,16 @@ class ChromaVectorStore:
         workspace_root: str | None = None,
         relative_path: str | None = None,
         language: str | None = None,
+        exclude_relative_path: str | None = None,
     ) -> list[VectorSearchHit]:
         """
-        Search by an externally generated query embedding.
+        Search workspace chunks using an externally generated embedding.
 
-        Optional metadata filters restrict the search to a workspace,
-        file, or programming language.
+        Optional filters:
+        - workspace_root: Restrict results to one workspace.
+        - relative_path: Restrict results to one file.
+        - language: Restrict results to one programming language.
+        - exclude_relative_path: Exclude one file from results.
         """
 
         if top_k < 1:
@@ -492,13 +497,21 @@ class ChromaVectorStore:
                 "top_k must be greater than zero."
             )
 
-        if (
-            relative_path is not None
-            and workspace_root is None
-        ):
+        if relative_path is not None and workspace_root is None:
             raise ValueError(
                 "workspace_root is required when filtering by relative_path."
             )
+
+        if exclude_relative_path is not None:
+            if workspace_root is None:
+                raise ValueError(
+                    "workspace_root is required when excluding a relative_path."
+                )
+
+            if not exclude_relative_path.strip():
+                raise ValueError(
+                    "exclude_relative_path cannot be empty."
+                )
 
         vector = self._validate_vector(query_embedding)
 
@@ -519,6 +532,17 @@ class ChromaVectorStore:
                 {"language": language}
             )
 
+        if exclude_relative_path is not None:
+            filters.append(
+                {
+                    "relative_path": {
+                        "$ne": exclude_relative_path
+                    }
+                }
+            )
+
+        # IMPORTANT:
+        # Construct the final filter AFTER adding every condition.
         where = self._combine_filters(filters)
 
         try:
@@ -564,6 +588,7 @@ class ChromaVectorStore:
             raise VectorStoreOperationError(
                 "Vector similarity search failed."
             ) from exc
+
 
     def count(self) -> int:
         """Return the total number of indexed vector records."""

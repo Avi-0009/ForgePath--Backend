@@ -399,3 +399,41 @@ def test_rejects_invalid_vector_values(vector_store):
         )
 
     assert vector_store.count() == 0
+
+def test_search_excludes_selected_file(vector_store):
+    chunks = [
+        make_chunk(
+            relative_path="app/main.py",
+            content="def main(): return 42",
+        ),
+        make_chunk(
+            relative_path="app/auth.py",
+            content="def authenticate_user(): return True",
+        ),
+    ]
+
+    vector_store.upsert_chunks(
+        chunks,
+        [
+            [1.0, 0.0, 0.0],
+            [0.9, 0.1, 0.0],
+        ],
+    )
+
+    results = vector_store.search(
+        [1.0, 0.0, 0.0],
+        workspace_root="C:/projects/forgepath",
+        exclude_relative_path="app/main.py",
+        top_k=10,
+    )
+
+    assert len(results) == 1
+
+    assert results[0].metadata["relative_path"] == "app/auth.py"
+
+def test_search_rejects_exclusion_without_workspace(vector_store):
+    with pytest.raises(ValueError, match="workspace_root is required"):
+        vector_store.search(
+            [1.0, 0.0, 0.0],
+            exclude_relative_path="app/main.py",
+        )

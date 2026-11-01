@@ -481,3 +481,73 @@ def test_embedding_model_mismatch_is_rejected(
             )
     finally:
         vector_store.close()
+
+
+def test_search_excludes_selected_file(
+    indexing_environment,
+    tmp_path,
+):
+    indexing_service, _, _ = indexing_environment
+
+    root = str(tmp_path / "workspace")
+
+    documents = [
+        make_document(
+            "def main():\n    return authenticate_user()\n",
+            workspace_root=root,
+            relative_path="app/main.py",
+        ),
+        make_document(
+            "def authenticate_user():\n    return True\n",
+            workspace_root=root,
+            relative_path="app/auth.py",
+        ),
+        make_document(
+            "class User:\n    pass\n",
+            workspace_root=root,
+            relative_path="app/models.py",
+        ),
+    ]
+
+    run(
+        indexing_service.index_documents(documents)
+    )
+
+    results = run(
+        indexing_service.search(
+            "authentication implementation",
+            workspace_root=root,
+            exclude_relative_path="app/main.py",
+            top_k=10,
+        )
+    )
+
+    assert len(results) == 2
+
+    returned_paths = {
+        result.metadata["relative_path"]
+        for result in results
+    }
+
+    assert "app/main.py" not in returned_paths
+    assert returned_paths == {
+        "app/auth.py",
+        "app/models.py",
+    }
+
+
+def test_search_rejects_exclusion_without_workspace(
+    indexing_environment,
+):
+    indexing_service, _, _ = indexing_environment
+
+    with pytest.raises(
+        ValueError,
+        match="workspace_root is required",
+    ):
+        run(
+            indexing_service.search(
+                "authentication",
+                exclude_relative_path="app/main.py",
+            )
+        )

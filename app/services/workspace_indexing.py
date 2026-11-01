@@ -228,13 +228,25 @@ class WorkspaceIndexingService:
         workspace_root: str | None = None,
         relative_path: str | None = None,
         language: str | None = None,
+        exclude_relative_path: str | None = None,
     ) -> list[VectorSearchHit]:
         """
         Perform semantic search against indexed workspace chunks.
 
-        The query is embedded using the same EmbeddingService
-        configuration used when indexing documents.
+        Optional filters restrict retrieval to a workspace, file,
+        or programming language.
+
+        A selected source file can be excluded to retrieve only
+        additional project context.
         """
+
+        if (
+            exclude_relative_path is not None
+            and workspace_root is None
+        ):
+            raise ValueError(
+                "workspace_root is required when excluding a relative_path."
+            )
 
         query_embedding = await self.embedding_service.embed_query(
             query
@@ -246,4 +258,5 @@ class WorkspaceIndexingService:
             workspace_root=workspace_root,
             relative_path=relative_path,
             language=language,
+            exclude_relative_path=exclude_relative_path,
         )

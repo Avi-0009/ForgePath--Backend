@@ -1,6 +1,9 @@
 import asyncio
 from unittest.mock import AsyncMock, Mock
 
+from starlette.requests import Request
+from app.main import app
+
 from app.api.v1.routes import code_review as code_review_routes
 from app.schemas.code_review import (
     CodeReviewFileRequest,
@@ -65,9 +68,24 @@ def test_local_file_review_uses_saved_project_instructions(monkeypatch):
         review_mode="general",
     )
 
+    # This test focuses on saved project instructions,
+    # so semantic indexing is disabled.
+    monkeypatch.setattr(
+        app.state,
+        "workspace_indexing_service",
+        None,
+        raising=False,
+    )
+
+    http_request = Request({
+        "type": "http",
+        "app": app,
+    })
+
     result = asyncio.run(
         code_review_routes.review_local_file(
             request,
+            http_request,
             _current_user=object(),
         )
     )

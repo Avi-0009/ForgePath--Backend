@@ -10,8 +10,9 @@ OPENAI_MODEL = "gpt-6-luna"
 OPENAI_REASONING_EFFORT = "low"
 
 NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
-NVIDIA_ENABLE_THINKING = True
-NVIDIA_MAX_TOKENS = 16384
+NVIDIA_ENABLE_THINKING = False
+NVIDIA_MAX_TOKENS = 8192
+# NVIDIA_MAX_TOKENS = 12,288 or 16,384
 
 REQUEST_TIMEOUT_SECONDS = 240
 
@@ -211,6 +212,7 @@ async def generate_text(
                 "temperature": 1,
                 "top_p": 0.95,
                 "max_tokens": NVIDIA_MAX_TOKENS,
+                "stream": False,
                 "chat_template_kwargs": {
                     "enable_thinking": NVIDIA_ENABLE_THINKING,
                 },
