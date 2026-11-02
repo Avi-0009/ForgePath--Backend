@@ -15,6 +15,7 @@ from app.services.workspace_chunking import (
 )
 from app.services.workspace_ingestion import (
     IngestedWorkspaceDocument,
+    WorkspaceIngestionResult,
 )
 
 
@@ -35,6 +36,8 @@ class WorkspaceIndexingResult:
     vectors_upserted: int
     stale_vectors_deleted: int
     empty_files: int
+    unchanged_files_skipped: int = 0
+    deleted_files: int = 0
 
 
 def get_embedding_model_identifier(
@@ -101,20 +104,18 @@ class WorkspaceIndexingService:
 
         return await self.index_documents([document])
 
+    
     async def index_documents(
         self,
         documents: Sequence[IngestedWorkspaceDocument],
     ) -> WorkspaceIndexingResult:
         """
-        Index multiple ingested documents.
+        Index changed documents and reuse vectors for unchanged files.
 
-        Existing vectors for each file are preserved until embedding
-        generation succeeds and replacement vectors are upserted.
+        Existing vectors are preserved until replacement embeddings
+        have been generated successfully.
 
-        Obsolete chunks from previously indexed versions of supplied
-        files are deleted after successful upsert.
-
-        Files absent from this input are not automatically deleted.
+        Obsolete chunks are removed after successful upsert.
         """
 
         if not documents:
@@ -124,6 +125,7 @@ class WorkspaceIndexingService:
                 vectors_upserted=0,
                 stale_vectors_deleted=0,
                 empty_files=0,
+                unchanged_files_skipped=0,
             )
 
         prepared_documents: list[
@@ -136,8 +138,9 @@ class WorkspaceIndexingService:
 
         all_chunks: list[WorkspaceChunk] = []
         seen_files: set[tuple[str, str]] = set()
+        unchanged_files_skipped = 0
 
-        # Prepare chunks and collect the previously indexed IDs.
+        # Check each document before generating chunks or embeddings.
         for document in documents:
 
             file_identity = (
@@ -152,6 +155,18 @@ class WorkspaceIndexingService:
                 )
 
             seen_files.add(file_identity)
+
+            existing_document_sha256 = (
+                self.vector_store.get_file_document_sha256(
+                    workspace_root=document.workspace_root,
+                    relative_path=document.relative_path,
+                )
+            )
+
+            # Identical document: reuse its existing vectors.
+            if existing_document_sha256 == document.sha256:
+                unchanged_files_skipped += 1
+                continue
 
             chunks = chunk_document(document)
 
@@ -170,7 +185,7 @@ class WorkspaceIndexingService:
 
             all_chunks.extend(chunks)
 
-        # Generate all embeddings before modifying stored vectors.
+        # Generate embeddings only for changed documents.
         if all_chunks:
             texts = [
                 chunk.content
@@ -190,6 +205,7 @@ class WorkspaceIndexingService:
 
         stale_vectors_deleted = 0
 
+        # Remove obsolete chunks only after successful embedding/upsert.
         for document, chunks, existing_ids in prepared_documents:
 
             expected_ids = {
@@ -218,7 +234,74 @@ class WorkspaceIndexingService:
                 for _, chunks, _ in prepared_documents
                 if not chunks
             ),
+            unchanged_files_skipped=unchanged_files_skipped,
         )
+
+    
+    async def index_workspace(
+        self,
+        ingestion: WorkspaceIngestionResult,
+    ) -> WorkspaceIndexingResult:
+        """
+        Index a workspace snapshot and safely remove deleted-file vectors.
+        """
+
+        # Validate that all documents belong to this workspace.
+        if any(
+            document.workspace_root != ingestion.workspace_root
+            for document in ingestion.documents
+        ):
+            raise ValueError(
+                "All documents must belong to the ingested workspace."
+            )
+
+        # First index all new and modified documents.
+        result = await self.index_documents(
+            ingestion.documents
+        )
+
+        # Never delete vectors if the scan was incomplete.
+        if ingestion.truncated:
+            return result
+
+        # Get all files currently stored in ChromaDB.
+        indexed_paths = self.vector_store.get_workspace_file_paths(
+            workspace_root=ingestion.workspace_root,
+        )
+
+        # Get all files observed during the latest filesystem scan.
+        observed_paths = set(
+            ingestion.observed_relative_paths
+        )
+
+        # Anything indexed but not observed is a deletion candidate.
+        missing_paths = indexed_paths - observed_paths
+
+        deleted_files = 0
+        deleted_vectors = 0
+
+        for relative_path in sorted(missing_paths):
+            deleted = self.vector_store.delete_file_chunks(
+                workspace_root=ingestion.workspace_root,
+                relative_path=relative_path,
+            )
+
+            if deleted:
+                deleted_files += 1
+                deleted_vectors += deleted
+
+        return WorkspaceIndexingResult(
+            files_processed=result.files_processed,
+            chunks_processed=result.chunks_processed,
+            vectors_upserted=result.vectors_upserted,
+            stale_vectors_deleted=(
+                result.stale_vectors_deleted + deleted_vectors
+            ),
+            empty_files=result.empty_files,
+            unchanged_files_skipped=result.unchanged_files_skipped,
+            deleted_files=deleted_files,
+        )
+
 
     async def search(
         self,

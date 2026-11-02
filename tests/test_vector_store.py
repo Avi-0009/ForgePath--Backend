@@ -1,5 +1,6 @@
 import hashlib
 import pytest
+from dataclasses import replace
 
 from app.services.workspace_chunking import WorkspaceChunk
 from app.services.vector_store import (
@@ -31,6 +32,7 @@ def make_chunk(
     content="def main():\n    return 42\n",
     start_line=1,
     end_line=2,
+    document_sha256="a" * 64,
 ):
     content_hash = hashlib.sha256(
         content.encode("utf-8")
@@ -44,7 +46,7 @@ def make_chunk(
         start_line=start_line,
         end_line=end_line,
         content=content,
-        document_sha256="a" * 64,
+        document_sha256=document_sha256,
         chunk_sha256=content_hash,
     )
 
@@ -90,6 +92,68 @@ def test_upserts_workspace_chunks(vector_store):
 
     assert inserted == 2
     assert vector_store.count() == 2
+
+
+def test_get_file_document_sha256(vector_store):
+    chunk = make_chunk(
+        document_sha256="a" * 64,
+    )
+
+    vector_store.upsert_chunks(
+        [chunk],
+        [[1.0, 0.0, 0.0]],
+    )
+
+    result = vector_store.get_file_document_sha256(
+        workspace_root="C:/projects/forgepath",
+        relative_path="app/main.py",
+    )
+
+    assert result == "a" * 64
+
+
+def test_get_file_document_sha256_returns_none_when_file_is_not_indexed(
+    vector_store,
+):
+    result = vector_store.get_file_document_sha256(
+        workspace_root="C:/projects/forgepath",
+        relative_path="app/missing.py",
+    )
+
+    assert result is None
+
+
+def test_get_file_document_sha256_rejects_inconsistent_chunk_metadata(
+    vector_store,
+):
+    first_chunk = make_chunk(
+        chunk_index=0,
+        document_sha256="a" * 64,
+    )
+
+    second_chunk = replace(
+        make_chunk(
+            chunk_index=1,
+            content="def second():\n    return 2\n",
+            document_sha256="a" * 64,
+        ),
+        document_sha256="b" * 64,
+    )
+
+    vector_store.upsert_chunks(
+        [first_chunk, second_chunk],
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+    )
+
+    result = vector_store.get_file_document_sha256(
+        workspace_root="C:/projects/forgepath",
+        relative_path="app/main.py",
+    )
+
+    assert result is None
 
 
 def test_search_returns_document_and_metadata(vector_store):
@@ -437,3 +501,49 @@ def test_search_rejects_exclusion_without_workspace(vector_store):
             [1.0, 0.0, 0.0],
             exclude_relative_path="app/main.py",
         )
+
+
+def test_get_workspace_file_paths(vector_store):
+    chunks = [
+        make_chunk(
+            relative_path="app/main.py",
+            chunk_index=0,
+        ),
+        make_chunk(
+            relative_path="app/main.py",
+            chunk_index=1,
+            content="def second():\n    return 2\n",
+        ),
+        make_chunk(
+            relative_path="app/auth.py",
+            content="def authenticate():\n    return True\n",
+        ),
+    ]
+
+    vector_store.upsert_chunks(
+        chunks,
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+
+    result = vector_store.get_workspace_file_paths(
+        workspace_root="C:/projects/forgepath",
+    )
+
+    assert result == {
+        "app/main.py",
+        "app/auth.py",
+    }
+
+
+def test_get_workspace_file_paths_returns_empty_set(
+    vector_store,
+):
+    result = vector_store.get_workspace_file_paths(
+        workspace_root="C:/projects/empty",
+    )
+
+    assert result == set()

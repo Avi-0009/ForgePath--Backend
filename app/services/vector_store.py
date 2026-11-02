@@ -351,6 +351,130 @@ class ChromaVectorStore:
                 "Could not retrieve file vector IDs."
             ) from exc
 
+    def get_file_document_sha256(
+        self,
+        *,
+        workspace_root: str,
+        relative_path: str,
+    ) -> str | None:
+        """Return the stored document hash if all file chunks agree."""
+
+        where = self._file_filter(
+            workspace_root,
+            relative_path,
+        )
+
+        try:
+            result = self._collection.get(
+                where=where,
+                include=["metadatas"],
+            )
+
+            metadatas = result["metadatas"] or []
+
+            if not metadatas:
+                return None
+
+            document_hashes = []
+
+            for metadata in metadatas:
+                if not isinstance(metadata, dict):
+                    return None
+
+                document_hash = metadata.get("document_sha256")
+
+                if (
+                    not isinstance(document_hash, str)
+                    or len(document_hash) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in document_hash
+                    )
+                ):
+                    return None
+
+                document_hashes.append(document_hash)
+
+            # Inconsistent metadata means the file needs re-indexing.
+            if len(set(document_hashes)) != 1:
+                return None
+
+            return document_hashes[0]
+
+        except Exception as exc:
+            raise VectorStoreOperationError(
+                "Could not retrieve the indexed document hash."
+            ) from exc
+
+    
+    def get_workspace_file_paths(
+        self,
+        *,
+        workspace_root: str,
+    ) -> set[str]:
+        """Return all indexed file paths for one workspace."""
+
+        if not workspace_root.strip():
+            raise ValueError("workspace_root cannot be empty.")
+
+        try:
+            result = self._collection.get(
+                where={"workspace_root": workspace_root},
+                include=["metadatas"],
+            )
+
+            ids = result.get("ids")
+            metadatas = result.get("metadatas")
+
+            if ids is None:
+                raise VectorStoreOperationError(
+                    "Could not retrieve workspace vector IDs."
+                )
+
+            if not ids:
+                return set()
+
+            if metadatas is None or len(metadatas) != len(ids):
+                raise VectorStoreOperationError(
+                    "Workspace vector metadata is incomplete."
+                )
+
+            relative_paths: set[str] = set()
+
+            for metadata in metadatas:
+                if not isinstance(metadata, dict):
+                    raise VectorStoreOperationError(
+                        "Workspace vector metadata is invalid."
+                    )
+
+                if metadata.get("workspace_root") != workspace_root:
+                    raise VectorStoreOperationError(
+                        "Workspace vector metadata contains an unexpected root."
+                    )
+
+                relative_path = metadata.get("relative_path")
+
+                if (
+                    not isinstance(relative_path, str)
+                    or not relative_path.strip()
+                ):
+                    raise VectorStoreOperationError(
+                        "Workspace vector metadata contains an invalid file path."
+                    )
+
+                relative_paths.add(relative_path)
+
+            return relative_paths
+
+        except VectorStoreError:
+            raise
+
+        except Exception as exc:
+            raise VectorStoreOperationError(
+                "Could not retrieve indexed workspace file paths."
+            ) from exc
+
+
     def close(self) -> None:
         """Close the Chroma client and release its resources."""
 

@@ -57,20 +57,17 @@ class WorkspaceIngestionResult:
     files_skipped: int
     total_bytes: int
     truncated: bool
+    observed_relative_paths: tuple[str, ...]
 
 
 def _is_link_or_junction(path: Path) -> bool:
     """Avoid traversing symbolic links and Windows junctions."""
 
-    try:
-        if path.is_symlink():
-            return True
-
-        is_junction = getattr(path, "is_junction", None)
-        return bool(is_junction and is_junction())
-
-    except OSError:
+    if path.is_symlink():
         return True
+
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
 
 
 def _resolve_allowed_workspace_root(
@@ -183,6 +180,7 @@ def ingest_workspace(
     pending_directories = deque([(root, 0)])
 
     documents: list[IngestedWorkspaceDocument] = []
+    observed_relative_paths: set[str] = set()
 
     files_scanned = 0
     files_skipped = 0
@@ -202,22 +200,22 @@ def ingest_workspace(
             continue
 
         for entry in entries:
-            if _is_link_or_junction(entry):
-                continue
-
             try:
+                if _is_link_or_junction(entry):
+                    continue
+
                 relative_path = entry.relative_to(root).as_posix()
-
                 _validate_relative_path(relative_path)
-
                 entry_stat = entry.stat(follow_symlinks=False)
 
             except WorkspaceReadError:
                 files_skipped += 1
+                truncated = True
                 continue
 
             except (OSError, RuntimeError, ValueError):
                 files_skipped += 1
+                truncated = True
                 continue
 
             if stat.S_ISDIR(entry_stat.st_mode):
@@ -237,6 +235,8 @@ def ingest_workspace(
             if not _is_ingestable_file(entry):
                 files_skipped += 1
                 continue
+
+            observed_relative_paths.add(relative_path)
 
             if files_scanned >= max_files:
                 truncated = True
@@ -296,6 +296,9 @@ def ingest_workspace(
     return WorkspaceIngestionResult(
         workspace_root=str(root),
         documents=tuple(documents),
+        observed_relative_paths=tuple(
+            sorted(observed_relative_paths)
+        ),
         files_scanned=files_scanned,
         files_skipped=files_skipped,
         total_bytes=total_bytes,

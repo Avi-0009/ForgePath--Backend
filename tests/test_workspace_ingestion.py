@@ -44,6 +44,12 @@ def test_ingests_supported_workspace_files(allowed_workspace):
     assert result.total_bytes > 0
     assert result.truncated is False
 
+    assert set(result.observed_relative_paths) == {
+        "main.py",
+        "README.md",
+        "settings.toml",
+    }
+
     documents = {
         document.relative_path: document
         for document in result.documents
@@ -313,3 +319,61 @@ def test_skips_empty_and_whitespace_only_files(allowed_workspace):
     assert result.files_skipped == 2
     assert result.total_bytes == 0
     assert result.truncated is False
+
+
+def test_observes_empty_and_binary_supported_files(
+    allowed_workspace,
+):
+    root = allowed_workspace
+
+    (root / "empty.py").write_bytes(b"")
+    (root / "binary.py").write_bytes(b"\x00\x01\x02")
+    (root / "valid.py").write_text(
+        "value = 42\n",
+        encoding="utf-8",
+    )
+
+    result = ingest_workspace(root)
+
+    assert set(result.observed_relative_paths) == {
+        "empty.py",
+        "binary.py",
+        "valid.py",
+    }
+
+    assert {
+        document.relative_path
+        for document in result.documents
+    } == {"valid.py"}
+
+    assert result.truncated is False
+
+
+def test_marks_scan_incomplete_when_entry_stat_fails(
+    allowed_workspace,
+    monkeypatch,
+):
+    from pathlib import Path
+
+    root = allowed_workspace
+
+    (root / "unavailable.py").write_text(
+        "value = 42\n",
+        encoding="utf-8",
+    )
+
+    original_stat = Path.stat
+
+    def failing_stat(path, *args, **kwargs):
+        if path == root / "unavailable.py":
+            raise OSError("Simulated filesystem error.")
+
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+
+    result = ingest_workspace(root)
+
+    assert result.truncated is True
+    assert result.documents == ()
+    assert result.observed_relative_paths == ()

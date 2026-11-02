@@ -182,6 +182,99 @@ def test_index_multiple_documents(
     assert vector_store.count() == 2
 
 
+def test_unchanged_document_skips_embedding_generation(
+    indexing_environment,
+    tmp_path,
+):
+    indexing_service, vector_store, provider = indexing_environment
+
+    root = str(tmp_path / "workspace")
+
+    document = make_document(
+        "def calculate():\n    return 42\n",
+        workspace_root=root,
+    )
+
+    first_result = run(
+        indexing_service.index_document(document)
+    )
+
+    assert first_result.vectors_upserted == 1
+    assert len(provider.document_batches) == 1
+
+    original_vector_count = vector_store.count()
+
+    second_result = run(
+        indexing_service.index_document(document)
+    )
+
+    assert second_result.unchanged_files_skipped == 1
+    assert second_result.files_processed == 0
+    assert second_result.chunks_processed == 0
+    assert second_result.vectors_upserted == 0
+    assert second_result.stale_vectors_deleted == 0
+
+    # No additional embedding request should have occurred.
+    assert len(provider.document_batches) == 1
+
+    assert vector_store.count() == original_vector_count
+
+
+def test_incremental_indexing_embeds_only_changed_documents(
+    indexing_environment,
+    tmp_path,
+):
+    indexing_service, vector_store, provider = indexing_environment
+
+    root = str(tmp_path / "workspace")
+
+    unchanged_document = make_document(
+        "def authenticate():\n    return True\n",
+        workspace_root=root,
+        relative_path="app/auth.py",
+    )
+
+    changed_document = make_document(
+        "def calculate():\n    return 10\n",
+        workspace_root=root,
+        relative_path="app/math.py",
+    )
+
+    run(
+        indexing_service.index_documents(
+            [unchanged_document, changed_document]
+        )
+    )
+
+    assert len(provider.document_batches) == 1
+    assert vector_store.count() == 2
+
+    updated_document = make_document(
+        "def calculate():\n    return 100\n",
+        workspace_root=root,
+        relative_path="app/math.py",
+    )
+
+    result = run(
+        indexing_service.index_documents(
+            [unchanged_document, updated_document]
+        )
+    )
+
+    assert result.unchanged_files_skipped == 1
+    assert result.files_processed == 1
+    assert result.chunks_processed == 1
+    assert result.vectors_upserted == 1
+
+    # The second embedding request contains only the changed file.
+    assert len(provider.document_batches) == 2
+    assert provider.document_batches[1] == [
+        "def calculate():\n    return 100\n"
+    ]
+
+    assert vector_store.count() == 2
+
+
 def test_semantic_search_returns_indexed_document(
     indexing_environment,
     tmp_path,
