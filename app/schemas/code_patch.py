@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
+from datetime import datetime
 
 
 class CodePatchRequest(BaseModel):
@@ -116,3 +117,40 @@ class CodePatchRollbackResponse(BaseModel):
     restored_sha256: str
     recovery_backup_id: str
     rollback_applied: bool = False
+
+
+class CodePatchBackupSummary(BaseModel):
+    """Metadata for one locally stored patch backup."""
+
+    backup_id: str = Field(
+        pattern=r"^[a-f0-9]{32}$"
+    )
+
+    relative_path: str
+    original_sha256: str
+    proposed_sha256: str
+    created_at: datetime
+
+    backup_status: Literal[
+        "available",
+        "missing",
+        "corrupt",
+    ]
+
+
+class CodePatchBackupListResponse(BaseModel):
+    """Paginated backup history for one workspace."""
+
+    workspace_root: str
+    total: int = Field(ge=0)
+
+    items: list[CodePatchBackupSummary] = Field(
+        default_factory=list,
+    )
+
+
+class CodePatchBackupDetailResponse(CodePatchBackupSummary):
+    """Detailed metadata for one patch backup."""
+
+    workspace_root: str
+    backup_size_bytes: int = Field(ge=0)

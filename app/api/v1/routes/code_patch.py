@@ -1,7 +1,14 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 
 from app.api.dependencies import get_current_user
 from app.core.ai_provider import AIProviderError
@@ -13,6 +20,8 @@ from app.schemas.code_patch import (
     CodePatchApplyResponse,
     CodePatchRollbackRequest,
     CodePatchRollbackResponse,
+    CodePatchBackupListResponse,
+    CodePatchBackupDetailResponse,
 )
 from app.services.code_patch import (
     CodePatchError,
@@ -23,10 +32,12 @@ from app.services.code_patch_apply import (
     PatchApplyError,
     ProposedPatchHashMismatch,
     StalePatchSourceError,
-    apply_code_patch,
     PatchBackupNotFound,
     PatchBackupIntegrityError,
+    apply_code_patch,
     rollback_code_patch,
+    list_patch_backups,
+    get_patch_backup_detail,
 )
 from app.services.workspace import (
     WorkspaceAccessDenied,
@@ -350,4 +361,138 @@ async def rollback_applied_code_patch(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected rollback error occurred.",
+        ) from None
+
+
+@router.get(
+    "/backups",
+    response_model=CodePatchBackupListResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def list_code_patch_backups(
+    _current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+    workspace_root: str = Query(
+        ...,
+        min_length=1,
+        max_length=1024,
+    ),
+    relative_path: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=1024,
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> CodePatchBackupListResponse:
+    """List patch backups for an allowlisted workspace."""
+
+    try:
+        return await list_patch_backups(
+            workspace_root=workspace_root,
+            relative_path=relative_path,
+            limit=limit,
+            offset=offset,
+        )
+
+    except WorkspaceConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace configuration is invalid.",
+        ) from exc
+
+    except WorkspaceAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceInvalidPath as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except PatchBackupIntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    except PatchApplyError as exc:
+        logger.exception("Could not list patch backups.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        logger.exception("Unexpected patch backup listing failure.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retrieve patch backup history.",
+        ) from None
+
+
+@router.get(
+    "/backups/{backup_id}",
+    response_model=CodePatchBackupDetailResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_code_patch_backup(
+    backup_id: str,
+    _current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+) -> CodePatchBackupDetailResponse:
+    """Retrieve metadata and integrity status for one patch backup."""
+
+    try:
+        return await get_patch_backup_detail(backup_id)
+
+    except PatchBackupNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except PatchBackupIntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace configuration is invalid.",
+        ) from exc
+
+    except WorkspaceAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceInvalidPath as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except PatchApplyError as exc:
+        logger.exception("Could not retrieve patch backup details.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        logger.exception("Unexpected patch backup detail failure.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retrieve patch backup details.",
         ) from None

@@ -15,6 +15,9 @@ from app.schemas.code_patch import (
     CodePatchApplyResponse,
     CodePatchRollbackRequest,
     CodePatchRollbackResponse,
+    CodePatchBackupSummary,
+    CodePatchBackupListResponse,
+    CodePatchBackupDetailResponse,
 )
 from app.services.workspace import (
     DEFAULT_MAX_FILE_BYTES,
@@ -684,4 +687,246 @@ async def rollback_code_patch(
     return await asyncio.to_thread(
         _rollback_code_patch_sync,
         request,
+    )
+
+
+def _parse_backup_created_at(manifest: dict) -> datetime:
+    """Parse the timestamp stored in a backup manifest."""
+
+    value = manifest.get("created_at")
+
+    if not isinstance(value, str):
+        raise PatchBackupIntegrityError(
+            "The backup timestamp is invalid."
+        )
+
+    try:
+        created_at = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise PatchBackupIntegrityError(
+            "The backup timestamp is invalid."
+        ) from exc
+
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+
+    return created_at
+
+
+def _inspect_backup(
+    backup_id: str,
+    expected_sha256: str,
+) -> tuple[str, int]:
+    """Check backup availability and verify its content hash."""
+
+    try:
+        backup_bytes = _read_rollback_backup(backup_id)
+
+    except PatchBackupNotFound:
+        return "missing", 0
+
+    except PatchBackupIntegrityError:
+        return "corrupt", 0
+
+    actual_hash = hashlib.sha256(backup_bytes).hexdigest()
+
+    if actual_hash != expected_sha256:
+        return "corrupt", len(backup_bytes)
+
+    return "available", len(backup_bytes)
+
+
+def _list_patch_backups_sync(
+    *,
+    workspace_root: str,
+    relative_path: str | None,
+    limit: int,
+    offset: int,
+) -> CodePatchBackupListResponse:
+    """List verified backup metadata for an allowlisted workspace."""
+
+    if limit < 1 or limit > 200:
+        raise ValueError("limit must be between 1 and 200.")
+
+    if offset < 0:
+        raise ValueError("offset cannot be negative.")
+
+    root = _resolve_allowlisted_root(workspace_root)
+    canonical_root = str(root)
+
+    normalized_relative_path = None
+
+    if relative_path is not None:
+        normalized_relative_path = "/".join(
+            _validate_relative_path(relative_path)
+        )
+
+    directory = _backup_directory()
+
+    if directory.is_symlink():
+        raise PatchBackupIntegrityError(
+            "The backup directory cannot be a symbolic link."
+        )
+
+    summaries: list[CodePatchBackupSummary] = []
+
+    try:
+        manifest_paths = list(directory.glob("*.json"))
+    except OSError as exc:
+        raise PatchApplyError(
+            "Could not inspect the patch backup directory."
+        ) from exc
+
+    for manifest_path in manifest_paths:
+
+        backup_id = manifest_path.stem
+
+        if (
+            len(backup_id) != 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in backup_id
+            )
+        ):
+            continue
+
+        if manifest_path.is_symlink():
+            continue
+
+        try:
+            manifest = _read_rollback_manifest(backup_id)
+            created_at = _parse_backup_created_at(manifest)
+
+            manifest_root = manifest["workspace_root"]
+
+            if manifest_root != canonical_root:
+                continue
+
+            manifest_relative_path = "/".join(
+                _validate_relative_path(
+                    manifest["relative_path"]
+                )
+            )
+
+            if (
+                normalized_relative_path is not None
+                and manifest_relative_path != normalized_relative_path
+            ):
+                continue
+
+        except (
+            PatchBackupNotFound,
+            PatchBackupIntegrityError,
+            WorkspaceInvalidPath,
+        ):
+            # An unreadable or malformed manifest cannot be trusted
+            # for workspace/file filtering.
+            continue
+
+        backup_status, _ = _inspect_backup(
+            backup_id,
+            manifest["original_sha256"],
+        )
+
+        summaries.append(
+            CodePatchBackupSummary(
+                backup_id=backup_id,
+                relative_path=manifest_relative_path,
+                original_sha256=manifest["original_sha256"],
+                proposed_sha256=manifest["proposed_sha256"],
+                created_at=created_at,
+                backup_status=backup_status,
+            )
+        )
+
+    summaries.sort(
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+
+    total = len(summaries)
+
+    return CodePatchBackupListResponse(
+        workspace_root=canonical_root,
+        total=total,
+        items=summaries[offset : offset + limit],
+    )
+
+
+async def list_patch_backups(
+    *,
+    workspace_root: str,
+    relative_path: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> CodePatchBackupListResponse:
+    """List patch backups without blocking the event loop."""
+
+    return await asyncio.to_thread(
+        _list_patch_backups_sync,
+        workspace_root=workspace_root,
+        relative_path=relative_path,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _get_patch_backup_detail_sync(
+    backup_id: str,
+) -> CodePatchBackupDetailResponse:
+    """Inspect one backup and verify its contents."""
+
+    if (
+        len(backup_id) != 32
+        or any(
+            character not in "0123456789abcdef"
+            for character in backup_id
+        )
+    ):
+        raise PatchBackupNotFound(
+            "The requested patch backup was not found."
+        )
+
+    manifest = _read_rollback_manifest(backup_id)
+
+    root = _resolve_allowlisted_root(
+        manifest["workspace_root"]
+    )
+
+    if str(root) != manifest["workspace_root"]:
+        raise PatchBackupIntegrityError(
+            "The backup workspace path is not canonical."
+        )
+
+    relative_path = "/".join(
+        _validate_relative_path(manifest["relative_path"])
+    )
+
+    created_at = _parse_backup_created_at(manifest)
+
+    backup_status, backup_size = _inspect_backup(
+        backup_id,
+        manifest["original_sha256"],
+    )
+
+    return CodePatchBackupDetailResponse(
+        backup_id=backup_id,
+        workspace_root=str(root),
+        relative_path=relative_path,
+        original_sha256=manifest["original_sha256"],
+        proposed_sha256=manifest["proposed_sha256"],
+        created_at=created_at,
+        backup_status=backup_status,
+        backup_size_bytes=backup_size,
+    )
+
+
+async def get_patch_backup_detail(
+    backup_id: str,
+) -> CodePatchBackupDetailResponse:
+    """Inspect one patch backup without blocking the event loop."""
+
+    return await asyncio.to_thread(
+        _get_patch_backup_detail_sync,
+        backup_id,
     )
