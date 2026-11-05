@@ -93,3 +93,26 @@ class CodePatchApplyResponse(BaseModel):
     applied_sha256: str
     backup_id: str
     patch_applied: bool
+
+
+class CodePatchRollbackRequest(BaseModel):
+    """Request to restore a previously applied patch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backup_id: str = Field(
+        pattern=r"^[a-f0-9]{32}$",
+        description="Backup identifier returned when the patch was applied.",
+    )
+
+    approval: Literal["rollback"]
+
+
+class CodePatchRollbackResponse(BaseModel):
+    """Result of restoring a previously applied patch."""
+
+    relative_path: str
+    original_sha256: str
+    restored_sha256: str
+    recovery_backup_id: str
+    rollback_applied: bool = False

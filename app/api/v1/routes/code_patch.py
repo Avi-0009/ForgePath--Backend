@@ -11,6 +11,8 @@ from app.schemas.code_patch import (
     CodePatchResponse,
     CodePatchApplyRequest,
     CodePatchApplyResponse,
+    CodePatchRollbackRequest,
+    CodePatchRollbackResponse,
 )
 from app.services.code_patch import (
     CodePatchError,
@@ -22,6 +24,9 @@ from app.services.code_patch_apply import (
     ProposedPatchHashMismatch,
     StalePatchSourceError,
     apply_code_patch,
+    PatchBackupNotFound,
+    PatchBackupIntegrityError,
+    rollback_code_patch,
 )
 from app.services.workspace import (
     WorkspaceAccessDenied,
@@ -264,3 +269,85 @@ async def apply_approved_code_patch(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while applying the patch.",
         ) from exc
+
+
+@router.post(
+    "/rollback",
+    response_model=CodePatchRollbackResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def rollback_applied_code_patch(
+    payload: CodePatchRollbackRequest,
+    _current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+) -> CodePatchRollbackResponse:
+    """Restore the original file from a verified patch backup."""
+
+    try:
+        return await rollback_code_patch(payload)
+
+    except PatchBackupNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except PatchBackupIntegrityError as exc:
+        logger.error("Patch backup integrity verification failed.")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    except StalePatchSourceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceConfigurationError as exc:
+        logger.error("Rollback workspace configuration error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Workspace configuration is invalid.",
+        ) from exc
+
+    except WorkspaceAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceFileNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceInvalidPath as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except WorkspaceReadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except PatchApplyError as exc:
+        logger.exception("Patch rollback failed.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        logger.exception("Unexpected patch rollback failure.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected rollback error occurred.",
+        ) from None

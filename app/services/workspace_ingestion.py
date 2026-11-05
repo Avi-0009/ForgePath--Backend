@@ -58,6 +58,7 @@ class WorkspaceIngestionResult:
     total_bytes: int
     truncated: bool
     observed_relative_paths: tuple[str, ...]
+    empty_relative_paths: tuple[str, ...] = ()
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -181,6 +182,7 @@ def ingest_workspace(
 
     documents: list[IngestedWorkspaceDocument] = []
     observed_relative_paths: set[str] = set()
+    empty_relative_paths: set[str] = set()
 
     files_scanned = 0
     files_skipped = 0
@@ -271,6 +273,7 @@ def ingest_workspace(
 
             if not source.content.strip():
                 files_skipped += 1
+                empty_relative_paths.add(source.relative_path)
                 continue
 
             if source.size_bytes > remaining_bytes:
@@ -298,6 +301,9 @@ def ingest_workspace(
         documents=tuple(documents),
         observed_relative_paths=tuple(
             sorted(observed_relative_paths)
+        ),
+        empty_relative_paths=tuple(
+            sorted(empty_relative_paths)
         ),
         files_scanned=files_scanned,
         files_skipped=files_skipped,

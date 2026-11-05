@@ -274,13 +274,21 @@ class WorkspaceIndexingService:
             ingestion.observed_relative_paths
         )
 
-        # Anything indexed but not observed is a deletion candidate.
+        empty_paths = set(
+            ingestion.empty_relative_paths
+        )
+
+        # Remove files that disappeared or became empty.
         missing_paths = indexed_paths - observed_paths
+
+        empty_indexed_paths = indexed_paths & empty_paths
+
+        paths_to_delete = missing_paths | empty_indexed_paths
 
         deleted_files = 0
         deleted_vectors = 0
 
-        for relative_path in sorted(missing_paths):
+        for relative_path in sorted(paths_to_delete):
             deleted = self.vector_store.delete_file_chunks(
                 workspace_root=ingestion.workspace_root,
                 relative_path=relative_path,

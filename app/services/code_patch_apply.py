@@ -13,6 +13,8 @@ from app.core.config import settings
 from app.schemas.code_patch import (
     CodePatchApplyRequest,
     CodePatchApplyResponse,
+    CodePatchRollbackRequest,
+    CodePatchRollbackResponse,
 )
 from app.services.workspace import (
     DEFAULT_MAX_FILE_BYTES,
@@ -35,6 +37,14 @@ class StalePatchSourceError(PatchApplyError):
 
 class ProposedPatchHashMismatch(PatchApplyError):
     """The proposed content does not match its supplied SHA-256."""
+
+
+class PatchBackupNotFound(PatchApplyError):
+    """The requested patch backup does not exist."""
+
+
+class PatchBackupIntegrityError(PatchApplyError):
+    """The patch backup or its manifest failed integrity checks."""
 
 
 def _is_junction(path: Path) -> bool:
@@ -355,3 +365,323 @@ async def apply_code_patch(
 ) -> CodePatchApplyResponse:
     """Apply an explicitly approved patch without blocking the event loop."""
     return await asyncio.to_thread(_apply_code_patch_sync, request)
+
+
+def _is_sha256_digest(value: object) -> bool:
+    """Check whether a value is a valid lowercase SHA-256 digest."""
+
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(
+            character in "0123456789abcdef"
+            for character in value
+        )
+    )
+
+
+def _read_rollback_manifest(backup_id: str) -> dict:
+    """Read and validate a backup manifest."""
+
+    manifest_path = _backup_directory() / f"{backup_id}.json"
+
+    if manifest_path.is_symlink():
+        raise PatchBackupIntegrityError(
+            "The backup manifest cannot be a symbolic link."
+        )
+
+    try:
+        with manifest_path.open("rb") as manifest_file:
+            opened_stat = os.fstat(manifest_file.fileno())
+
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise PatchBackupIntegrityError(
+                    "The backup manifest is not a regular file."
+                )
+
+            raw = manifest_file.read(16_385)
+
+            if len(raw) > 16_384:
+                raise PatchBackupIntegrityError(
+                    "The backup manifest exceeds the supported size."
+                )
+
+        manifest = json.loads(raw.decode("utf-8"))
+
+    except FileNotFoundError as exc:
+        raise PatchBackupNotFound(
+            "The requested patch backup was not found."
+        ) from exc
+
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PatchBackupIntegrityError(
+            "The backup manifest could not be read."
+        ) from exc
+
+    if not isinstance(manifest, dict):
+        raise PatchBackupIntegrityError(
+            "The backup manifest has an invalid structure."
+        )
+
+    required_fields = (
+        "backup_id",
+        "workspace_root",
+        "relative_path",
+        "original_sha256",
+        "proposed_sha256",
+    )
+
+    if any(
+        not isinstance(manifest.get(field), str)
+        or not manifest[field].strip()
+        for field in required_fields
+    ):
+        raise PatchBackupIntegrityError(
+            "The backup manifest is missing required information."
+        )
+
+    if manifest["backup_id"] != backup_id:
+        raise PatchBackupIntegrityError(
+            "The backup identifier does not match its manifest."
+        )
+
+    if not _is_sha256_digest(manifest["original_sha256"]):
+        raise PatchBackupIntegrityError(
+            "The original backup hash is invalid."
+        )
+
+    if not _is_sha256_digest(manifest["proposed_sha256"]):
+        raise PatchBackupIntegrityError(
+            "The proposed file hash is invalid."
+        )
+
+    return manifest
+
+
+def _read_rollback_backup(backup_id: str) -> bytes:
+    """Read the original backup without following symbolic links."""
+
+    backup_path = _backup_directory() / f"{backup_id}.bak"
+
+    if backup_path.is_symlink():
+        raise PatchBackupIntegrityError(
+            "The backup file cannot be a symbolic link."
+        )
+
+    try:
+        with backup_path.open("rb") as backup_file:
+            opened_stat = os.fstat(backup_file.fileno())
+
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise PatchBackupIntegrityError(
+                    "The backup is not a regular file."
+                )
+
+            if opened_stat.st_size > DEFAULT_MAX_FILE_BYTES:
+                raise PatchBackupIntegrityError(
+                    "The backup exceeds the supported file size."
+                )
+
+            original_bytes = backup_file.read(
+                DEFAULT_MAX_FILE_BYTES + 1
+            )
+
+    except FileNotFoundError as exc:
+        raise PatchBackupNotFound(
+            "The original patch backup file was not found."
+        ) from exc
+
+    except OSError as exc:
+        raise PatchBackupIntegrityError(
+            "The original patch backup could not be read."
+        ) from exc
+
+    if len(original_bytes) > DEFAULT_MAX_FILE_BYTES:
+        raise PatchBackupIntegrityError(
+            "The backup exceeds the supported file size."
+        )
+
+    return original_bytes
+
+
+def _rollback_code_patch_sync(
+    request: CodePatchRollbackRequest,
+) -> CodePatchRollbackResponse:
+    """Restore a verified backup using an atomic file replacement."""
+
+    backup_id = request.backup_id
+
+    manifest = _read_rollback_manifest(backup_id)
+
+    workspace_root_value = manifest["workspace_root"]
+    relative_path = manifest["relative_path"]
+
+    # Verify that the original workspace is still allowlisted.
+    root = _resolve_allowlisted_root(workspace_root_value)
+
+    if str(root) != workspace_root_value:
+        raise PatchBackupIntegrityError(
+            "The backup workspace path is not canonical."
+        )
+
+    parts = _validate_relative_path(relative_path)
+    _reject_links(root, parts)
+
+    source = read_configured_workspace_file(
+        workspace_root=str(root),
+        relative_path=relative_path,
+    )
+
+    canonical_parts = tuple(source.relative_path.split("/"))
+    _reject_links(root, canonical_parts)
+
+    target = root.joinpath(*canonical_parts)
+
+    if not target.is_file():
+        raise WorkspaceFileNotFound(
+            "The original source file is no longer available."
+        )
+
+    # Verify the stored backup against the original hash.
+    backup_bytes = _read_rollback_backup(backup_id)
+
+    restored_sha256 = hashlib.sha256(
+        backup_bytes
+    ).hexdigest()
+
+    if restored_sha256 != manifest["original_sha256"]:
+        raise PatchBackupIntegrityError(
+            "The backup contents do not match the stored original hash."
+        )
+
+    # The current file must still contain the exact patched contents.
+    current_bytes, current_stat = _read_current_bytes(
+        target,
+        DEFAULT_MAX_FILE_BYTES,
+    )
+
+    current_sha256 = hashlib.sha256(
+        current_bytes
+    ).hexdigest()
+
+    if (
+        current_sha256 != manifest["proposed_sha256"]
+        or current_sha256 != source.sha256
+    ):
+        raise StalePatchSourceError(
+            "The file has changed since the patch was applied. "
+            "Rollback was cancelled to protect newer changes."
+        )
+
+    original_mode = stat.S_IMODE(current_stat.st_mode)
+
+    # Preserve the currently applied version so rollback can be reversed.
+    recovery_backup_id = uuid.uuid4().hex
+
+    _write_backup(
+        original_bytes=current_bytes,
+        backup_id=recovery_backup_id,
+        workspace_root=root,
+        relative_path=source.relative_path,
+        original_sha256=current_sha256,
+        proposed_sha256=restored_sha256,
+    )
+
+    temporary_path: Path | None = None
+
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".forgepath-rollback-",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+
+        temporary_path = Path(temporary_name)
+
+        with os.fdopen(file_descriptor, "wb") as temporary_file:
+            temporary_file.write(backup_bytes)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        if os.name != "nt":
+            os.chmod(temporary_path, original_mode)
+
+        # Verify the source did not change before replacement.
+        _reject_links(root, canonical_parts)
+
+        latest_bytes, latest_stat = _read_current_bytes(
+            target,
+            DEFAULT_MAX_FILE_BYTES,
+        )
+
+        latest_sha256 = hashlib.sha256(
+            latest_bytes
+        ).hexdigest()
+
+        if (
+            latest_sha256 != current_sha256
+            or latest_stat.st_dev != current_stat.st_dev
+            or latest_stat.st_ino != current_stat.st_ino
+        ):
+            raise StalePatchSourceError(
+                "The source changed before rollback could be completed. "
+                "The recovery backup has been retained."
+            )
+
+        os.replace(temporary_path, target)
+        temporary_path = None
+
+        # Verify the restored file on disk.
+        restored_bytes, _ = _read_current_bytes(
+            target,
+            DEFAULT_MAX_FILE_BYTES,
+        )
+
+        actual_restored_sha256 = hashlib.sha256(
+            restored_bytes
+        ).hexdigest()
+
+        if actual_restored_sha256 != restored_sha256:
+            raise PatchApplyError(
+                "Rollback verification failed. The recovery backup "
+                f"is available as {recovery_backup_id}."
+            )
+
+        return CodePatchRollbackResponse(
+            relative_path=source.relative_path,
+            original_sha256=current_sha256,
+            restored_sha256=actual_restored_sha256,
+            recovery_backup_id=recovery_backup_id,
+            rollback_applied=True,
+        )
+
+    except (
+        PatchApplyError,
+        WorkspaceAccessDenied,
+        WorkspaceInvalidPath,
+    ):
+        raise
+
+    except OSError as exc:
+        raise PatchApplyError(
+            "Rollback failed. The recovery backup has been retained as "
+            f"{recovery_backup_id}."
+        ) from exc
+
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+async def rollback_code_patch(
+    request: CodePatchRollbackRequest,
+) -> CodePatchRollbackResponse:
+    """Restore a previously applied patch without blocking the event loop."""
+
+    return await asyncio.to_thread(
+        _rollback_code_patch_sync,
+        request,
+    )

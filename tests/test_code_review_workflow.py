@@ -19,6 +19,7 @@ from app.api.v1.routes import code_review as review_routes
 REVIEW_URL = "/api/v1/code-review/file"
 PATCH_URL = "/api/v1/code-patch"
 APPLY_URL = "/api/v1/code-patch/apply"
+ROLLBACK_URL = "/api/v1/code-patch/rollback"
 
 ORIGINAL_CODE = "def add(a, b):\n    return a - b\n"
 PROPOSED_CODE = "def add(a, b):\n    return a + b\n"
@@ -227,6 +228,51 @@ def test_review_patch_and_apply_workflow(
 
     assert backup_path.is_file()
     assert backup_path.read_bytes() == original_bytes
+
+    # Roll back the applied patch.
+    rollback_response = client.post(
+        ROLLBACK_URL,
+        headers=headers,
+        json={
+            "backup_id": apply_data["backup_id"],
+            "approval": "rollback",
+        },
+    )
+
+    assert rollback_response.status_code == 200, rollback_response.text
+
+    rollback_data = rollback_response.json()
+
+    assert rollback_data["rollback_applied"] is True
+    assert rollback_data["restored_sha256"] == review_data["sha256"]
+
+    # The original source must be restored.
+    assert source_file.read_bytes() == original_bytes
+
+    # The patched version must have been preserved for recovery.
+    recovery_backup_path = (
+        local_app_data
+        / "ForgePath"
+        / "backups"
+        / f"{rollback_data['recovery_backup_id']}.bak"
+    )
+
+    assert recovery_backup_path.is_file()
+    assert recovery_backup_path.read_bytes() == PROPOSED_CODE.encode("utf-8")
+
+    # 5. Verify that the recovery backup can restore the patched version.
+    recovery_response = client.post(
+        ROLLBACK_URL,
+        headers=headers,
+        json={
+            "backup_id": rollback_data["recovery_backup_id"],
+            "approval": "rollback",
+        },
+    )
+
+    assert recovery_response.status_code == 200, recovery_response.text
+
+    assert source_file.read_text(encoding="utf-8") == PROPOSED_CODE
 
 
 def test_review_and_patch_endpoints_require_authentication(
