@@ -5,6 +5,7 @@ from app.api.v1.routes.code_review import router as code_review_router
 from app.api.v1.routes.local_context import router as local_context_router
 from app.api.v1.routes.code_patch import router as code_patch_router
 from app.api.v1.routes.workspace import router as workspace_router
+from app.api.v1.routes.execution import router as test_execution_router
 
 
 router = APIRouter(prefix="/api/v1")
@@ -14,3 +15,4 @@ router.include_router(code_review_router)
 router.include_router(local_context_router)
 router.include_router(code_patch_router)
 router.include_router(workspace_router)
+router.include_router(test_execution_router)
