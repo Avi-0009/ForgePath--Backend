@@ -216,7 +216,7 @@ async def index_workspace(
 
         # Generate embeddings and persist the resulting chunks.
         result = await indexing_service.index_documents(
-            ingestion.documents
+            ingestion
         )
 
         return WorkspaceIndexResponse(
@@ -225,6 +225,8 @@ async def index_workspace(
             vectors_upserted=result.vectors_upserted,
             stale_vectors_deleted=result.stale_vectors_deleted,
             empty_files=result.empty_files,
+            unchanged_files_skipped=result.unchanged_files_skipped,
+            deleted_files=result.deleted_files,
             files_scanned=ingestion.files_scanned,
             files_skipped=ingestion.files_skipped,
             total_bytes=ingestion.total_bytes,

@@ -13,6 +13,7 @@ from app.services.workspace_indexing import (
 )
 from app.services.workspace_ingestion import (
     IngestedWorkspaceDocument,
+    WorkspaceIngestionResult,
 )
 
 
@@ -644,3 +645,156 @@ def test_search_rejects_exclusion_without_workspace(
                 exclude_relative_path="app/main.py",
             )
         )
+
+
+
+def test_index_workspace_removes_deleted_file_vectors(
+    indexing_environment,
+    tmp_path,
+):
+    indexing_service, vector_store, _ = indexing_environment
+
+    root = str(tmp_path / "workspace")
+
+    main_document = make_document(
+        "def main():\n    return 42\n",
+        workspace_root=root,
+        relative_path="src/main.py",
+    )
+
+    deleted_document = make_document(
+        "def obsolete():\n    return 0\n",
+        workspace_root=root,
+        relative_path="src/obsolete.py",
+    )
+
+    run(
+        indexing_service.index_documents(
+            [main_document, deleted_document]
+        )
+    )
+
+    assert vector_store.count() == 2
+
+    ingestion = WorkspaceIngestionResult(
+        workspace_root=root,
+        documents=(main_document,),
+        observed_relative_paths=("src/main.py",),
+        files_scanned=2,
+        files_skipped=0,
+        total_bytes=main_document.size_bytes,
+        truncated=False,
+    )
+
+    result = run(
+        indexing_service.index_workspace(ingestion)
+    )
+
+    assert result.unchanged_files_skipped == 1
+    assert result.deleted_files == 1
+    assert result.stale_vectors_deleted == 1
+
+    assert vector_store.count() == 1
+
+    remaining_paths = vector_store.get_workspace_file_paths(
+        workspace_root=root,
+    )
+
+    assert remaining_paths == {"src/main.py"}
+
+
+def test_incomplete_workspace_scan_does_not_delete_vectors(
+    indexing_environment,
+    tmp_path,
+):
+    indexing_service, vector_store, _ = indexing_environment
+
+    root = str(tmp_path / "workspace")
+
+    main_document = make_document(
+        "def main():\n    return 42\n",
+        workspace_root=root,
+        relative_path="src/main.py",
+    )
+
+    another_document = make_document(
+        "def another():\n    return 10\n",
+        workspace_root=root,
+        relative_path="src/another.py",
+    )
+
+    run(
+        indexing_service.index_documents(
+            [main_document, another_document]
+        )
+    )
+
+    ingestion = WorkspaceIngestionResult(
+        workspace_root=root,
+        documents=(main_document,),
+        observed_relative_paths=("src/main.py",),
+        files_scanned=1,
+        files_skipped=0,
+        total_bytes=main_document.size_bytes,
+        truncated=True,
+    )
+
+    result = run(
+        indexing_service.index_workspace(ingestion)
+    )
+
+    assert result.unchanged_files_skipped == 1
+    assert result.deleted_files == 0
+    assert result.stale_vectors_deleted == 0
+
+    # Both files must remain indexed.
+    assert vector_store.count() == 2
+
+
+def test_observed_but_unreadable_file_is_not_deleted(
+    indexing_environment,
+    tmp_path,
+):
+    indexing_service, vector_store, _ = indexing_environment
+
+    root = str(tmp_path / "workspace")
+
+    main_document = make_document(
+        "def main():\n    return 42\n",
+        workspace_root=root,
+        relative_path="src/main.py",
+    )
+
+    unreadable_document = make_document(
+        "def private_function():\n    pass\n",
+        workspace_root=root,
+        relative_path="src/unreadable.py",
+    )
+
+    run(
+        indexing_service.index_documents(
+            [main_document, unreadable_document]
+        )
+    )
+
+    ingestion = WorkspaceIngestionResult(
+        workspace_root=root,
+        documents=(main_document,),
+        observed_relative_paths=(
+            "src/main.py",
+            "src/unreadable.py",
+        ),
+        files_scanned=2,
+        files_skipped=1,
+        total_bytes=main_document.size_bytes,
+        truncated=False,
+    )
+
+    result = run(
+        indexing_service.index_workspace(ingestion)
+    )
+
+    assert result.deleted_files == 0
+
+    # The unreadable file was observed, so its vectors are preserved.
+    assert vector_store.count() == 2

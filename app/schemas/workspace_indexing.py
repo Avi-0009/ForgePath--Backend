@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -32,6 +31,8 @@ class WorkspaceIndexResponse(BaseModel):
     vectors_upserted: int = Field(ge=0)
     stale_vectors_deleted: int = Field(ge=0)
     empty_files: int = Field(ge=0)
+    unchanged_files_skipped: int = Field(default=0, ge=0)
+    deleted_files: int = Field(default=0, ge=0)
 
     files_scanned: int = Field(ge=0)
     files_skipped: int = Field(ge=0)
