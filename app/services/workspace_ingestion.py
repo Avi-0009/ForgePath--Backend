@@ -5,7 +5,16 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.config import settings
+from app.services.workspace import (
+    DEFAULT_MAX_FILE_BYTES,
+    EXCLUDED_DIRECTORIES,
+    LANGUAGE_BY_EXTENSION,
+    WorkspaceConfigurationError,
+    WorkspaceReadError,
+    _validate_relative_path,
+    read_configured_workspace_file,
+    resolve_allowed_workspace_root as resolve_workspace_root,
+)
 from app.services.workspace import (
     DEFAULT_MAX_FILE_BYTES,
     EXCLUDED_DIRECTORIES,
@@ -71,53 +80,6 @@ def _is_link_or_junction(path: Path) -> bool:
     return bool(is_junction and is_junction())
 
 
-def _resolve_allowed_workspace_root(
-    workspace_root: str | Path,
-) -> Path:
-    """Resolve a workspace and require an exact configured-root match."""
-
-    configured_roots = settings.workspace_root_list
-
-    if not configured_roots:
-        raise WorkspaceConfigurationError(
-            "No workspace roots are configured."
-        )
-
-    try:
-        root = Path(workspace_root).expanduser().resolve(strict=True)
-
-        if not root.is_dir():
-            raise ValueError("Workspace root is not a directory.")
-
-        allowed_roots: set[Path] = set()
-
-        for configured_root in configured_roots:
-            resolved = (
-                Path(configured_root)
-                .expanduser()
-                .resolve(strict=True)
-            )
-
-            if not resolved.is_dir():
-                raise ValueError(
-                    "A configured workspace root is not a directory."
-                )
-
-            allowed_roots.add(resolved)
-
-    except (OSError, RuntimeError, ValueError):
-        raise WorkspaceConfigurationError(
-            "A workspace root is invalid or unavailable."
-        ) from None
-
-    if root not in allowed_roots:
-        raise WorkspaceAccessDenied(
-            "The selected workspace is not allowlisted."
-        )
-
-    return root
-
-
 def resolve_allowed_workspace_root(
     workspace_root: str | Path,
 ) -> Path:
@@ -128,7 +90,7 @@ def resolve_allowed_workspace_root(
     Returns the canonical resolved workspace path.
     """
 
-    return _resolve_allowed_workspace_root(workspace_root)
+    return resolve_workspace_root(workspace_root)
 
 
 def _is_ingestable_file(path: Path) -> bool:
@@ -176,7 +138,7 @@ def ingest_workspace(
     if max_file_bytes < 1:
         raise ValueError("max_file_bytes must be greater than zero.")
 
-    root = _resolve_allowed_workspace_root(workspace_root)
+    root = resolve_workspace_root(workspace_root)
 
     pending_directories = deque([(root, 0)])
 

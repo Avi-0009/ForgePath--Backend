@@ -27,6 +27,7 @@ from app.services.workspace import (
     WorkspaceInvalidPath,
     _validate_relative_path,
     read_configured_workspace_file,
+    resolve_allowed_workspace_root,
 )
 
 
@@ -70,41 +71,9 @@ def _reject_links(root: Path, parts: tuple[str, ...]) -> None:
 
 
 def _resolve_allowlisted_root(workspace_root: str) -> Path:
-    """Resolve the requested root and require an exact allowlist match."""
-    if not settings.workspace_root_list:
-        raise WorkspaceConfigurationError(
-            "No workspace roots are configured."
-        )
+    """Resolve a workspace using the centralized allowlist policy."""
 
-    try:
-        root = Path(workspace_root).expanduser().resolve(strict=True)
-
-        if not root.is_dir():
-            raise ValueError("Workspace root is not a directory.")
-
-        allowed_roots: set[Path] = set()
-
-        for configured_root in settings.workspace_root_list:
-            allowed = Path(configured_root).expanduser().resolve(strict=True)
-
-            if not allowed.is_dir():
-                raise ValueError("Configured root is not a directory.")
-
-            allowed_roots.add(allowed)
-
-    except WorkspaceConfigurationError:
-        raise
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise WorkspaceConfigurationError(
-            "A workspace root is invalid or unavailable."
-        ) from exc
-
-    if root not in allowed_roots:
-        raise WorkspaceAccessDenied(
-            "The selected workspace is not allowlisted."
-        )
-
-    return root
+    return resolve_allowed_workspace_root(workspace_root)
 
 
 def _backup_directory() -> Path:

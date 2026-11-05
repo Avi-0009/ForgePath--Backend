@@ -132,6 +132,125 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+
+def resolve_allowed_workspace_root(
+    workspace_root: str | Path,
+    allowed_workspace_roots: Sequence[str | Path] | None = None,
+) -> Path:
+    """
+    Resolve a workspace directory inside an explicitly configured root.
+
+    Child directories are permitted, but symbolic links and Windows
+    junctions along the selected child path are rejected.
+    """
+
+    candidates = (
+        allowed_workspace_roots
+        if allowed_workspace_roots is not None
+        else settings.workspace_root_list
+    )
+
+    if not candidates:
+        raise WorkspaceConfigurationError(
+            "No allowed workspace roots are configured."
+        )
+
+    requested_path = Path(workspace_root).expanduser()
+
+    if ".." in requested_path.parts:
+        raise WorkspaceAccessDenied(
+            "Parent-directory traversal is not permitted."
+        )
+
+    try:
+        requested_absolute = Path(os.path.abspath(requested_path))
+        resolved_requested = requested_path.resolve(strict=True)
+
+    except (OSError, RuntimeError, ValueError):
+        raise WorkspaceAccessDenied(
+            "The selected workspace is unavailable or invalid."
+        ) from None
+
+    if not resolved_requested.is_dir():
+        raise WorkspaceAccessDenied(
+            "The selected workspace must be a directory."
+        )
+
+    # Validate EVERY configured root before accepting a workspace.
+    resolved_candidates: list[tuple[Path, Path]] = []
+
+    for candidate in candidates:
+        configured_path = Path(candidate).expanduser()
+        resolved_allowed = _resolve_directory(configured_path)
+
+        if resolved_allowed is None:
+            raise WorkspaceConfigurationError(
+                "A configured workspace root is invalid or unavailable."
+            )
+
+        configured_absolute = Path(
+            os.path.abspath(configured_path)
+        )
+
+        resolved_candidates.append(
+            (configured_absolute, resolved_allowed)
+        )
+
+    # Check whether the requested workspace belongs to any allowed root.
+    for configured_absolute, resolved_allowed in resolved_candidates:
+
+        try:
+            relative_parts = requested_absolute.relative_to(
+                configured_absolute
+            ).parts
+
+        except ValueError:
+            continue
+
+        current = configured_absolute
+
+        for part in relative_parts:
+            current = current / part
+
+            try:
+                is_link = current.is_symlink()
+
+                is_junction_check = getattr(
+                    current,
+                    "is_junction",
+                    None,
+                )
+
+                is_junction = bool(
+                    is_junction_check and is_junction_check()
+                )
+
+            except OSError:
+                raise WorkspaceAccessDenied(
+                    "Could not safely validate the workspace path."
+                ) from None
+
+            if is_link or is_junction:
+                raise WorkspaceAccessDenied(
+                    "Workspace paths cannot contain symbolic links "
+                    "or directory junctions."
+                )
+
+        if not _is_relative_to(
+            resolved_requested,
+            resolved_allowed,
+        ):
+            raise WorkspaceAccessDenied(
+                "The selected workspace is outside the configured root."
+            )
+
+        return resolved_requested
+
+    raise WorkspaceAccessDenied(
+        "The selected workspace is not inside a configured workspace root."
+    )
+
+
 def _validate_relative_path(relative_path: str) -> tuple[str, ...]:
     if not relative_path or not relative_path.strip():
         raise WorkspaceInvalidPath("A relative file path is required.")
@@ -204,36 +323,10 @@ def read_workspace_file(
     if max_bytes < 1:
         raise ValueError("max_bytes must be greater than zero.")
 
-    root = _resolve_directory(workspace_root)
-
-    if root is None:
-        raise WorkspaceAccessDenied(
-            "The selected workspace is unavailable or invalid."
-        )
-
-    # Require explicit approval for each workspace root.
-    if not allowed_workspace_roots:
-        raise WorkspaceConfigurationError(
-            "No allowed workspace roots are configured."
-        )
-
-    allowed_roots: set[Path] = set()
-
-    for candidate in allowed_workspace_roots:
-        resolved = _resolve_directory(candidate)
-
-        if resolved is None:
-            raise WorkspaceConfigurationError(
-                "A configured workspace root is invalid or unavailable. "
-                "Check WORKSPACE_ALLOWED_ROOTS in your backend configuration."
-            )
-
-        allowed_roots.add(resolved)
-
-    if root not in allowed_roots:
-        raise WorkspaceAccessDenied(
-            "The selected workspace is not allowlisted."
-        )
+    root = resolve_allowed_workspace_root(
+        workspace_root=workspace_root,
+        allowed_workspace_roots=allowed_workspace_roots,
+    )
 
     parts = _validate_relative_path(relative_path)
     target = root.joinpath(*parts)
