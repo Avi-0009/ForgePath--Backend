@@ -104,3 +104,26 @@ def test_rejects_excessively_long_instructions(allowed_project):
             )
 
     asyncio.run(scenario())
+
+
+def test_accepts_project_nested_inside_allowlisted_root(
+    allowed_project,
+):
+    nested_project = allowed_project / "nested-project"
+    nested_project.mkdir()
+
+    async def scenario():
+        saved = await save_project_instructions(
+            project_root=nested_project,
+            instructions="Use FastAPI and pytest.",
+        )
+
+        retrieved = await get_project_instructions(
+            project_root=nested_project,
+        )
+
+        assert saved.project_root == str(nested_project.resolve())
+        assert retrieved is not None
+        assert retrieved.instructions == "Use FastAPI and pytest."
+
+    asyncio.run(scenario())

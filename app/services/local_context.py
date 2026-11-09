@@ -86,7 +86,10 @@ def _resolve_project_root(project_root: str | Path) -> Path:
 
         allowed_roots.add(resolved_root)
 
-    if requested_root not in allowed_roots:
+    if not any(
+        requested_root.is_relative_to(allowed_root)
+        for allowed_root in allowed_roots
+    ):
         raise LocalContextError(
             "Project context is only available for configured "
             "workspace roots."

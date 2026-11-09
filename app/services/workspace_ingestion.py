@@ -172,6 +172,10 @@ def ingest_workspace(
                 _validate_relative_path(relative_path)
                 entry_stat = entry.stat(follow_symlinks=False)
 
+            except WorkspaceAccessDenied:
+                files_skipped += 1
+                continue
+
             except WorkspaceReadError:
                 files_skipped += 1
                 truncated = True

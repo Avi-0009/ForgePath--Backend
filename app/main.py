@@ -1,3 +1,4 @@
+
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -19,6 +20,7 @@ from app.services.workspace_indexing import (
     WorkspaceIndexingService,
     get_embedding_model_identifier,
 )
+from app.services.agent_orchestration.runtime import AgentRuntimeManager
 
 
 logger = logging.getLogger(__name__)
@@ -27,16 +29,17 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Initialize and clean up workspace indexing resources.
-
-    When no provider is configured, the API starts normally,
-    but semantic indexing and search remain unavailable.
+    Initialize and clean up application-level resources.
     """
 
     embedding_provider = None
     vector_store = None
 
     app.state.workspace_indexing_service = None
+
+    # The agent runtime is initialized lazily when first requested.
+    agent_runtime_manager = AgentRuntimeManager()
+    app.state.agent_runtime_manager = agent_runtime_manager
 
     try:
         if settings.embedding_provider is None:
@@ -56,20 +59,17 @@ async def lifespan(app: FastAPI):
                     "EMBEDDING_PROVIDER=openai."
                 )
 
-            # Initialize the real embedding provider.
             embedding_provider = OpenAIEmbeddingProvider(
                 api_key=settings.openai_api_key.get_secret_value(),
                 model_name=settings.embedding_model,
                 dimensions=settings.embedding_dimensions,
             )
 
-            # Wrap the provider with common validation and batching.
             embedding_service = EmbeddingService(
                 provider=embedding_provider,
                 batch_size=settings.embedding_batch_size,
             )
 
-            # Initialize persistent local ChromaDB storage.
             vector_store = ChromaVectorStore(
                 dimensions=embedding_service.dimensions,
                 embedding_model=get_embedding_model_identifier(
@@ -77,7 +77,6 @@ async def lifespan(app: FastAPI):
                 ),
             )
 
-            # Expose one shared indexing service to FastAPI routes.
             app.state.workspace_indexing_service = (
                 WorkspaceIndexingService(
                     embedding_service=embedding_service,
@@ -96,7 +95,6 @@ async def lifespan(app: FastAPI):
         yield
 
     finally:
-        # Prevent new requests from obtaining a shutting-down service.
         app.state.workspace_indexing_service = None
 
         try:
@@ -104,10 +102,20 @@ async def lifespan(app: FastAPI):
                 vector_store.close()
 
         finally:
-            if embedding_provider is not None:
-                await embedding_provider.close()
+            try:
+                if embedding_provider is not None:
+                    await embedding_provider.close()
 
-        logger.info("Workspace indexing resources released.")
+            finally:
+                try:
+                    await agent_runtime_manager.close()
+
+                finally:
+                    app.state.agent_runtime_manager = None
+
+        logger.info(
+            "Workspace and agent runtime resources released."
+        )
 
 
 app: FastAPI = FastAPI(

@@ -377,3 +377,60 @@ def test_marks_scan_incomplete_when_entry_stat_fails(
     assert result.truncated is True
     assert result.documents == ()
     assert result.observed_relative_paths == ()
+
+
+def test_sensitive_paths_do_not_stop_workspace_scan(
+    allowed_workspace,
+):
+    root = allowed_workspace
+
+    # These paths must be skipped safely.
+    (root / ".env").write_text(
+        "SECRET=private",
+        encoding="utf-8",
+    )
+
+    (root / "credentials.json").write_text(
+        '{"secret": "private"}',
+        encoding="utf-8",
+    )
+
+    excluded_dir = root / ".git"
+    excluded_dir.mkdir()
+
+    (excluded_dir / "ignored.py").write_text(
+        "private = True",
+        encoding="utf-8",
+    )
+
+    # Valid project files must still be discovered.
+    app_dir = root / "app"
+    app_dir.mkdir()
+
+    (app_dir / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = root / "tests"
+    tests_dir.mkdir()
+
+    (tests_dir / "test_main.py").write_text(
+        "def test_example():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    result = ingest_workspace(root)
+
+    visible_paths = {
+        document.relative_path
+        for document in result.documents
+    }
+
+    assert visible_paths == {
+        "app/main.py",
+        "tests/test_main.py",
+    }
+
+    assert result.files_skipped == 3
+    assert result.truncated is False
