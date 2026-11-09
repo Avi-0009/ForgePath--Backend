@@ -215,7 +215,7 @@ async def index_workspace(
         )
 
         # Generate embeddings and persist the resulting chunks.
-        result = await indexing_service.index_documents(
+        result = await indexing_service.index_workspace(
             ingestion
         )
 
