@@ -19,7 +19,13 @@ from app.schemas.task_planning import (
     TaskPlanningResponse,
 )
 from app.services.agent_orchestration import nodes
-from app.services.agent_orchestration.graph import build_agent_graph
+from app.services.agent_orchestration.graph import (
+    build_agent_graph,
+    route_after_test_execution,
+    route_after_failure_analysis,
+    route_after_repair_file_selection,
+    route_after_patch_approval,
+)
 from app.services.test_execution.runner import (
     TestExecutionResult as ExecutionResult,
 )
@@ -332,3 +338,40 @@ def test_agent_graph_requires_checkpointer():
         match="checkpointer is required",
     ):
         build_agent_graph(checkpointer=None)
+
+
+def test_failed_tests_route_to_failure_analysis():
+    state = {
+        "status": "running",
+        "test_result": {"status": "failed"},
+    }
+    assert route_after_test_execution(state) == "analyze_test_failure"
+
+
+def test_passed_tests_end_workflow():
+    state = {
+        "status": "completed",
+        "test_result": {"status": "passed"},
+    }
+    assert route_after_test_execution(state) == "__end__"
+
+
+def test_failure_analysis_routes_to_file_selection():
+    state = {"status": "awaiting_repair_file_selection"}
+    assert route_after_failure_analysis(state) == "select_repair_file"
+
+
+def test_repair_file_selection_routes_to_patch_generation():
+    state = {
+        "status": "running",
+        "selected_file": "main.py",
+    }
+    assert route_after_repair_file_selection(state) == "generate_repair_patch"
+
+
+def test_approved_repair_routes_back_to_test_approval():
+    state = {
+        "status": "awaiting_test_approval",
+        "repair_mode": True,
+    }
+    assert route_after_patch_approval(state) == "approve_and_run_tests"

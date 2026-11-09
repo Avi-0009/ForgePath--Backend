@@ -12,6 +12,7 @@ WorkflowStatus = Literal[
     "tests_failed",
     "cancelled",
     "failed",
+    "awaiting_repair_file_selection",
 ]
 
 
@@ -60,3 +61,9 @@ class AgentWorkflowState(TypedDict):
 
     # Latest test execution result
     test_result: NotRequired[dict[str, Any] | None]
+
+    # Test failure analysis and bounded recovery
+    failure_analysis: NotRequired[dict[str, Any] | None]
+    repair_mode: NotRequired[bool]
+    repair_attempts: NotRequired[int]
+    max_repair_attempts: NotRequired[int]

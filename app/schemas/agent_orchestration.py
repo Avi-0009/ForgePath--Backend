@@ -8,6 +8,7 @@ from app.schemas.task_planning import (
     TaskPlanningRequest,
     TaskPlanningResponse,
 )
+from app.schemas.error_analysis import TestFailureAnalysis
 
 
 AgentWorkflowStatus = Literal[
@@ -21,6 +22,7 @@ AgentWorkflowStatus = Literal[
     "tests_failed",
     "cancelled",
     "failed",
+    "awaiting_repair_file_selection",
 ]
 
 
@@ -80,6 +82,7 @@ class AgentPendingAction(BaseModel):
     kind: Literal[
         "plan_approval",
         "file_selection",
+        "repair_file_selection",
         "patch_approval",
         "test_approval",
     ]
@@ -152,3 +155,16 @@ class AgentWorkflowResponse(BaseModel):
     test_result: TestExecutionResponse | None = None
 
     error_message: str | None = None
+
+    failure_analysis: TestFailureAnalysis | None = None
+
+    repair_attempts: int = Field(
+        default=0,
+        ge=0,
+    )
+
+    max_repair_attempts: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+    )

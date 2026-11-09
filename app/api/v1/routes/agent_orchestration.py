@@ -27,6 +27,7 @@ from app.schemas.task_planning import TaskPlanningResponse
 from app.services.agent_orchestration.runtime import (
     AgentRuntimeError,
 )
+from app.schemas.error_analysis import TestFailureAnalysis
 
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,7 @@ def _build_workflow_response(
     plan_data = values.get("plan")
     patch_data = values.get("patch_proposal")
     test_data = values.get("test_result")
+    analysis_data = values.get("failure_analysis")
     pending_data = values.get("pending_action")
 
     plan = (
@@ -151,6 +153,12 @@ def _build_workflow_response(
     test_result = (
         TestExecutionResponse.model_validate(test_data)
         if isinstance(test_data, dict)
+        else None
+    )
+
+    failure_analysis = (
+        TestFailureAnalysis.model_validate(analysis_data)
+        if isinstance(analysis_data, dict)
         else None
     )
 
@@ -192,6 +200,9 @@ def _build_workflow_response(
         manual_steps=values.get("manual_steps", []),
         skipped_steps=values.get("skipped_steps", []),
         test_result=test_result,
+        failure_analysis=failure_analysis,
+        repair_attempts=values.get("repair_attempts", 0),
+        max_repair_attempts=values.get("max_repair_attempts", 2),
         error_message=values.get("error_message"),
     )
 
@@ -234,6 +245,10 @@ async def start_agent_workflow(
         "pending_action": None,
         "patch_proposal": None,
         "test_result": None,
+        "failure_analysis": None,
+        "repair_mode": False,
+        "repair_attempts": 0,
+        "max_repair_attempts": 2,
         "error_message": None,
     }
 
@@ -338,6 +353,10 @@ async def resume_agent_workflow(
         "awaiting_test_approval": {
             "approve",
             "reject",
+            "cancel",
+        },
+        "awaiting_repair_file_selection": {
+            "select_file",
             "cancel",
         },
     }

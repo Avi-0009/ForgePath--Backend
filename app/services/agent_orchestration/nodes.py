@@ -1,9 +1,8 @@
 import asyncio
-from dataclasses import asdict
 import json
 import logging
 from typing import Any
-
+from dataclasses import asdict
 from langgraph.types import interrupt
 
 from app.core.ai_provider import AIProviderError
@@ -44,8 +43,13 @@ from app.services.workspace import (
     WorkspaceReadError,
     read_configured_workspace_file,
 )
-
 from app.services.agent_orchestration.state import AgentWorkflowState
+from app.schemas.error_analysis import TestFailureAnalysis
+from app.services.agent_orchestration.error_analysis import (
+    TestFailureAnalysisError,
+    analyze_test_failure,
+    sanitize_test_output,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -432,18 +436,306 @@ async def generate_patch_node(
         )
 
 
+
+async def analyze_test_failure_node(
+    state: AgentWorkflowState,
+) -> dict:
+    """Diagnose a failed test run and identify candidate source files."""
+
+    attempts = state.get("repair_attempts", 0)
+    max_attempts = state.get("max_repair_attempts", 2)
+
+    if attempts >= max_attempts:
+        return {
+            "status": "tests_failed",
+            "repair_mode": False,
+            "pending_action": None,
+            "message": "The maximum correction attempts have been exhausted.",
+        }
+
+    test_result = state.get("test_result")
+
+    if not isinstance(test_result, dict):
+        return _failure(
+            "Test failure analysis cannot start without a test result."
+        )
+
+    try:
+        analysis = await analyze_test_failure(
+            workspace_root=state["workspace_root"],
+            task_description=state["task_description"],
+            test_result=test_result,
+        )
+
+        analysis_data = analysis.model_dump(mode="json")
+
+        if not analysis.candidate_files:
+            return {
+                "failure_analysis": analysis_data,
+                "repair_mode": False,
+                "status": "tests_failed",
+                "pending_action": None,
+                "message": (
+                    "The test failure was analyzed, but no verified "
+                    "candidate source files were identified. "
+                    "Manual investigation is required."
+                ),
+                "error_message": analysis.root_cause,
+            }
+
+        return {
+            "failure_analysis": analysis_data,
+            "repair_mode": True,
+            "status": "awaiting_repair_file_selection",
+            "pending_action": {
+                "kind": "repair_file_selection",
+                "message": (
+                    "Review the failure diagnosis and select the "
+                    "source file to correct."
+                ),
+                "available_files": analysis.candidate_files,
+            },
+            "message": (
+                f"Test failure analyzed. "
+                f"Correction attempt {attempts + 1} "
+                f"of {max_attempts} is available."
+            ),
+            "error_message": None,
+        }
+
+    except (AIProviderError, TestFailureAnalysisError) as exc:
+        logger.warning("Test failure analysis failed: %s", exc)
+
+        return {
+            "status": "tests_failed",
+            "repair_mode": False,
+            "pending_action": None,
+            "message": "Automatic test failure analysis could not complete.",
+            "error_message": str(exc),
+        }
+
+    except WorkspaceReadError as exc:
+        logger.warning("Could not inspect workspace for failure analysis: %s", exc)
+
+        return {
+            "status": "tests_failed",
+            "repair_mode": False,
+            "pending_action": None,
+            "message": "The project could not be inspected for failure analysis.",
+            "error_message": str(exc),
+        }
+
+    except Exception:
+        logger.exception("Unexpected test failure analysis error.")
+
+        return {
+            "status": "tests_failed",
+            "repair_mode": False,
+            "pending_action": None,
+            "message": "Unexpected error during test failure analysis.",
+            "error_message": "The failure analysis could not be completed.",
+        }
+
+
+def select_repair_file_node(
+    state: AgentWorkflowState,
+) -> dict:
+    """Require the user to select a verified file for correction."""
+
+    pending = state.get("pending_action") or {}
+    available_files = pending.get("available_files", [])
+
+    analysis_data = state.get("failure_analysis")
+
+    if not isinstance(analysis_data, dict):
+        return _failure("The failure analysis is unavailable.")
+
+    analysis = TestFailureAnalysis.model_validate(analysis_data)
+
+    decision = interrupt(
+        {
+            "kind": "repair_file_selection",
+            "message": pending.get(
+                "message",
+                "Select a file to correct.",
+            ),
+            "analysis": analysis.model_dump(mode="json"),
+            "available_files": available_files,
+        },
+        response_schema=AgentWorkflowResumeRequest,
+    )
+
+    if decision.action == "cancel":
+        return {
+            "status": "tests_failed",
+            "repair_mode": False,
+            "pending_action": None,
+            "message": "Correction was cancelled by the user.",
+        }
+
+    if decision.action != "select_file":
+        return _failure("A valid correction file selection is required.")
+
+    selected_file = decision.selected_file
+
+    if (
+        selected_file not in available_files
+        or selected_file not in analysis.candidate_files
+    ):
+        return _failure(
+            "The selected file is not an approved candidate."
+        )
+
+    return {
+        "selected_file": selected_file,
+        "repair_mode": True,
+        "status": "running",
+        "pending_action": None,
+        "message": (
+            f"Selected {selected_file}. "
+            "Generating a corrective patch."
+        ),
+    }
+
+
+async def generate_repair_patch_node(
+    state: AgentWorkflowState,
+) -> dict:
+    """Generate a correction proposal based on test failure analysis."""
+
+    try:
+        selected_file = state.get("selected_file")
+
+        if not selected_file:
+            raise ValueError("No correction file has been selected.")
+
+        analysis_data = state.get("failure_analysis")
+
+        if not isinstance(analysis_data, dict):
+            raise ValueError("Test failure analysis is unavailable.")
+
+        analysis = TestFailureAnalysis.model_validate(analysis_data)
+
+        if selected_file not in analysis.candidate_files:
+            raise ValueError("The selected file is not a verified candidate.")
+
+        source = await asyncio.to_thread(
+            read_configured_workspace_file,
+            workspace_root=state["workspace_root"],
+            relative_path=selected_file,
+        )
+
+        test_result = state.get("test_result") or {}
+
+        stdout = sanitize_test_output(test_result.get("stdout"))
+        stderr = sanitize_test_output(test_result.get("stderr"))
+
+        failure_output = "\n".join(
+            part
+            for part in [
+                sanitize_test_output(test_result.get("stderr")),
+                sanitize_test_output(test_result.get("stdout")),
+            ]
+            if part
+        )
+
+        failure_evidence = (
+            failure_output
+            or analysis.explanation
+            or source.content[:4000]
+        )[:4000]
+
+        additional_context = json.dumps(
+            {
+                "task_description": state["task_description"],
+                "repair_attempt": state.get("repair_attempts", 0) + 1,
+                "failure_analysis": analysis.model_dump(mode="json"),
+                "test_runner": test_result.get("runner"),
+                "test_status": test_result.get("status"),
+                "exit_code": test_result.get("exit_code"),
+                "failed_test_output": failure_evidence,
+                "source_excerpt": source.content[:3500],
+                "instruction": (
+                    "Fix the diagnosed test failure with the smallest "
+                    "reasonable change. Preserve unrelated behavior."
+                ),
+            },
+            ensure_ascii=False,
+        )[:12_000]
+
+        request = CodePatchRequest(
+            workspace_root=state["workspace_root"],
+            relative_path=source.relative_path,
+            expected_sha256=source.sha256,
+            finding_title=analysis.summary[:200],
+            finding_evidence=failure_evidence,
+            finding_explanation=(
+                f"Likely root cause: {analysis.root_cause}\n\n"
+                f"Technical explanation: {analysis.explanation}"
+            )[:8000],
+            suggested_fix=analysis.suggested_fix[:8000],
+            additional_context=additional_context,
+        )
+
+        proposal = await generate_code_patch(request)
+
+        return {
+            "patch_proposal": proposal.model_dump(mode="json"),
+            "status": "awaiting_patch_approval",
+            "pending_action": {
+                "kind": "patch_approval",
+                "message": (
+                    "Review the proposed correction. "
+                    "Approving it will modify the selected file."
+                ),
+            },
+            "message": (
+                f"Corrective patch generated for {source.relative_path}. "
+                "Your approval is required."
+            ),
+            "error_message": None,
+        }
+
+    except (
+        AIProviderError,
+        CodePatchError,
+        WorkspaceReadError,
+    ) as exc:
+        logger.warning("Corrective patch generation failed: %s", exc)
+
+        return {
+            "status": "tests_failed",
+            "repair_mode": False,
+            "pending_action": None,
+            "message": "Could not generate a corrective patch.",
+            "error_message": str(exc),
+        }
+
+    except Exception:
+        logger.exception("Unexpected corrective patch generation error.")
+
+        return {
+            "status": "failed",
+            "repair_mode": False,
+            "pending_action": None,
+            "message": "Unexpected error during corrective patch generation.",
+            "error_message": "The corrective patch could not be generated.",
+        }
+
+
+
 async def approve_and_apply_patch_node(
     state: AgentWorkflowState,
 ) -> dict:
-    """Request patch approval and apply only after explicit approval."""
+    """Request approval and apply a patch only after explicit consent."""
 
     proposal = CodePatchResponse.model_validate(
         state["patch_proposal"]
     )
 
     pending = state.get("pending_action") or {}
+    repair_mode = bool(state.get("repair_mode", False))
 
-    # No file writes or other side effects occur before this interrupt.
     decision = interrupt(
         {
             "kind": "patch_approval",
@@ -456,6 +748,12 @@ async def approve_and_apply_patch_node(
             "summary": proposal.summary,
             "diff": proposal.diff,
             "proposed_sha256": proposal.proposed_sha256,
+            "repair_mode": repair_mode,
+            "repair_attempt": (
+                state.get("repair_attempts", 0) + 1
+                if repair_mode
+                else None
+            ),
         },
         response_schema=AgentWorkflowResumeRequest,
     )
@@ -463,15 +761,28 @@ async def approve_and_apply_patch_node(
     if decision.action == "cancel":
         return {
             "status": "cancelled",
-            "message": "Workflow cancelled before applying the patch.",
+            "repair_mode": False,
             "pending_action": None,
+            "message": "Workflow cancelled before applying the patch.",
         }
 
-    index = state.get("current_step_index", 0)
-    step = _current_step(state)
-    step_number = step["step_number"]
-
     if decision.action == "reject":
+        if repair_mode:
+            return {
+                "status": "tests_failed",
+                "repair_mode": False,
+                "selected_file": None,
+                "pending_action": None,
+                "message": (
+                    "The repair patch was rejected. "
+                    "The original test failure remains unresolved."
+                ),
+            }
+
+        index = state.get("current_step_index", 0)
+        step = _current_step(state)
+        step_number = step["step_number"]
+
         skipped = list(state.get("skipped_steps", []))
         _add_unique(skipped, step_number)
 
@@ -488,9 +799,14 @@ async def approve_and_apply_patch_node(
         }
 
     if decision.action != "approve":
-        return _failure(
-            "Invalid decision for patch approval."
-        )
+        return _failure("Invalid decision for patch approval.")
+
+    step_number = None
+    index = state.get("current_step_index", 0)
+
+    if not repair_mode:
+        step = _current_step(state)
+        step_number = step["step_number"]
 
     try:
         request = CodePatchApplyRequest(
@@ -515,10 +831,32 @@ async def approve_and_apply_patch_node(
             "applied_sha256": result.applied_sha256,
         })
 
+        if repair_mode:
+            attempts = state.get("repair_attempts", 0) + 1
+
+            return {
+                "applied_patches": applied_patches,
+                "repair_attempts": attempts,
+                "repair_mode": True,
+                "selected_file": None,
+                "pending_action": {
+                    "kind": "test_approval",
+                    "message": (
+                        f"Repair attempt {attempts} was applied to "
+                        f"{result.relative_path}. Approve rerunning tests."
+                    ),
+                },
+                "status": "awaiting_test_approval",
+                "message": (
+                    "The approved repair patch was applied. "
+                    "Tests must be rerun to verify the correction."
+                ),
+                "error_message": None,
+            }
+
         completed_steps = list(
             state.get("completed_steps", [])
         )
-
         _add_unique(completed_steps, step_number)
 
         return {
@@ -543,23 +881,34 @@ async def approve_and_apply_patch_node(
         )
 
 
+
 async def approve_and_run_tests_node(
     state: AgentWorkflowState,
 ) -> dict:
     """Request test approval and execute the configured test runner."""
 
+    repair_mode = bool(state.get("repair_mode", False))
+    repair_attempts = state.get("repair_attempts", 0)
+
     decision = interrupt(
         {
             "kind": "test_approval",
             "message": (
-                "All implementation steps have been processed. "
-                "Do you approve running the project's test suite?"
+                "A repair patch has been applied. "
+                "Do you approve rerunning the tests?"
+                if repair_mode
+                else (
+                    "All implementation steps have been processed. "
+                    "Do you approve running the project's test suite?"
+                )
             ),
             "runner": state["test_runner"],
             "timeout_seconds": state["test_timeout_seconds"],
             "completed_steps": state.get("completed_steps", []),
             "manual_steps": state.get("manual_steps", []),
             "skipped_steps": state.get("skipped_steps", []),
+            "repair_mode": repair_mode,
+            "repair_attempts": repair_attempts,
         },
         response_schema=AgentWorkflowResumeRequest,
     )
@@ -567,18 +916,25 @@ async def approve_and_run_tests_node(
     if decision.action == "cancel":
         return {
             "status": "cancelled",
-            "message": "Workflow cancelled before test execution.",
+            "repair_mode": False,
             "pending_action": None,
+            "message": "Workflow cancelled before test execution.",
         }
 
     if decision.action == "reject":
         return {
             "status": "completed_without_tests",
-            "message": (
-                "Implementation workflow finished. "
-                "Test execution was declined."
-            ),
+            "repair_mode": False,
             "pending_action": None,
+            "message": (
+                "The repair patch was applied, but test rerunning "
+                "was declined. The correction remains unverified."
+                if repair_mode
+                else (
+                    "Implementation workflow finished. "
+                    "Test execution was declined."
+                )
+            ),
         }
 
     if decision.action != "approve":
@@ -601,18 +957,31 @@ async def approve_and_run_tests_node(
         if response.status == "passed":
             return {
                 "test_result": response.model_dump(mode="json"),
+                "repair_mode": False,
                 "status": "completed",
                 "pending_action": None,
-                "message": "Implementation workflow and tests completed successfully.",
+                "message": (
+                    "The repair was verified successfully."
+                    if repair_mode
+                    else (
+                        "Implementation workflow and tests "
+                        "completed successfully."
+                    )
+                ),
             }
 
+        # Keep the graph active so it can analyze this failure.
         return {
             "test_result": response.model_dump(mode="json"),
-            "status": "tests_failed",
+            "status": "running",
             "pending_action": None,
             "message": (
-                "The implementation workflow finished, "
-                f"but tests returned status: {response.status}."
+                "Tests still fail after the repair."
+                if repair_mode
+                else (
+                    "The test suite failed. "
+                    "Analyzing the failure."
+                )
             ),
         }
 
@@ -621,6 +990,7 @@ async def approve_and_run_tests_node(
 
         return {
             "status": "tests_failed",
+            "repair_mode": False,
             "pending_action": None,
             "message": "The test runner could not complete successfully.",
             "error_message": str(exc),
@@ -631,6 +1001,7 @@ async def approve_and_run_tests_node(
 
         return {
             "status": "tests_failed",
+            "repair_mode": False,
             "pending_action": None,
             "message": "Unexpected error during test execution.",
             "error_message": str(exc),
