@@ -10,7 +10,10 @@ from fastapi import (
     status,
 )
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import (
+    get_current_user,
+    get_current_user_with_usage_context,
+)
 from app.core.ai_provider import AIProviderError
 from app.models.user import User
 from app.schemas.code_patch import (
@@ -74,7 +77,7 @@ async def create_code_patch(
     request: Request,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
 ) -> CodePatchResponse:
     """Generate a proposed code fix without modifying the source file."""

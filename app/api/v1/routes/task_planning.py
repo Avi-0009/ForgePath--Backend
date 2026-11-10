@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user_with_usage_context
 from app.core.ai_provider import AIProviderError
 from app.models.user import User
 from app.schemas.task_planning import (
@@ -42,7 +42,7 @@ async def create_task_plan(
     payload: TaskPlanningRequest,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
 ) -> TaskPlanningResponse:
     """Generate a structured implementation plan for a local project."""

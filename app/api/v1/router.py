@@ -8,6 +8,7 @@ from app.api.v1.routes.workspace import router as workspace_router
 from app.api.v1.routes.execution import router as test_execution_router
 from app.api.v1.routes.task_planning import router as task_planning_router
 from app.api.v1.routes.agent_orchestration import router as agent_orchestration_router
+from app.api.v1.routes.ai_usage import router as ai_usage_router
 
 
 router = APIRouter(prefix="/api/v1")
@@ -20,3 +21,4 @@ router.include_router(workspace_router)
 router.include_router(test_execution_router)
 router.include_router(task_planning_router)
 router.include_router(agent_orchestration_router)
+router.include_router(ai_usage_router)
