@@ -50,6 +50,8 @@ from app.services.agent_orchestration.error_analysis import (
     analyze_test_failure,
     sanitize_test_output,
 )
+from app.services.ai_usage_tracking import record_agent_test_run
+
 
 
 logger = logging.getLogger(__name__)
@@ -949,6 +951,8 @@ async def approve_and_run_tests_node(
             runner=state["test_runner"],
             timeout_seconds=state["test_timeout_seconds"],
         )
+
+        await record_agent_test_run(result)
 
         response = TestExecutionResponse(
             **asdict(result)

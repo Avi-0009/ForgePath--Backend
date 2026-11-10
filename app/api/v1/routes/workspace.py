@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_current_user, get_workspace_indexing_service
+from app.api.dependencies import get_current_user_with_usage_context, get_workspace_indexing_service
 from app.models.user import User
 
 from app.schemas.workspace import WorkspaceNode
@@ -62,7 +62,7 @@ router = APIRouter(
 async def get_workspace_tree_endpoint(
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
 ) -> WorkspaceNode:
     """Return the file tree for configured, allowlisted workspaces."""
@@ -105,7 +105,7 @@ async def prepare_workspace_context(
     payload: WorkspaceContextRequest,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
 ) -> WorkspaceContextResponse:
     """
@@ -190,7 +190,7 @@ async def index_workspace(
     payload: WorkspaceIndexRequest,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
     indexing_service: Annotated[
         WorkspaceIndexingService,
@@ -297,7 +297,7 @@ async def search_workspace(
     payload: WorkspaceSearchRequest,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
     indexing_service: Annotated[
         WorkspaceIndexingService,

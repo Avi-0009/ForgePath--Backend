@@ -9,11 +9,14 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.core.config import settings
 from app.db.base import Base
 from app.models import (
+    AgentTestRun,
+    AgentWorkflowHistory,
+    AIUsageEvent,
     AuthSession,
     EmailVerificationOTP,
     PasswordResetOTP,
     User,
-)  # noqa: F401
+)
 
 
 config = context.config
@@ -21,8 +24,6 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Use the existing DATABASE_URL configuration.
-# Escape percent signs for ConfigParser.
 config.set_main_option(
     "sqlalchemy.url",
     settings.database_url.replace("%", "%%"),

@@ -1,4 +1,3 @@
-
 import json
 from typing import Any
 
@@ -9,6 +8,7 @@ from app.schemas.code_review import (
     CodeReviewRequest,
     CodeReviewResponse,
 )
+from app.core.ai_usage_context import ai_usage_context
 
 
 class CodeReviewError(RuntimeError):
@@ -232,10 +232,11 @@ Use the exact source code's line numbers, starting at line 1.
 """
 
     try:
-        raw_result = await generate_text(
-            instructions=REVIEW_INSTRUCTIONS,
-            prompt=prompt,
-        )
+        with ai_usage_context(operation="code_review"):
+            raw_result = await generate_text(
+                instructions=REVIEW_INSTRUCTIONS,
+                prompt=prompt,
+            )
     except AIProviderError:
         # Preserve the provider's sanitized error for the caller.
         raise

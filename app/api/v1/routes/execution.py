@@ -5,12 +5,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user_with_usage_context
 from app.models.user import User
 from app.schemas.execution import (
     TestExecutionRequest,
     TestExecutionResponse,
 )
+from app.services.ai_usage_tracking import record_agent_test_run
 from app.services.test_execution.runner import (
     TestExecutionError,
     TestProjectConfigurationError,
@@ -40,10 +41,10 @@ async def run_local_tests(
     payload: TestExecutionRequest,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
 ) -> TestExecutionResponse:
-    """Execute a predefined test runner in an allowlisted workspace."""
+    """Execute local tests and persist metadata without storing output."""
 
     try:
         result = await asyncio.to_thread(
@@ -52,6 +53,8 @@ async def run_local_tests(
             runner=payload.runner,
             timeout_seconds=payload.timeout_seconds,
         )
+
+        await record_agent_test_run(result)
 
         return TestExecutionResponse(**asdict(result))
 
@@ -63,7 +66,6 @@ async def run_local_tests(
 
     except WorkspaceConfigurationError as exc:
         logger.error("Test execution workspace configuration error: %s", exc)
-
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Workspace configuration is invalid or unavailable.",
@@ -83,7 +85,6 @@ async def run_local_tests(
 
     except TestExecutionError:
         logger.exception("Local test execution failed.")
-
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not execute the requested tests.",
@@ -91,7 +92,6 @@ async def run_local_tests(
 
     except Exception:
         logger.exception("Unexpected local test execution failure.")
-
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Test execution failed unexpectedly.",

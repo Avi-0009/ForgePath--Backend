@@ -20,6 +20,7 @@ from app.services.workspace_ingestion import (
     WorkspaceIngestionResult,
     ingest_workspace,
 )
+from app.core.ai_usage_context import ai_usage_context
 
 
 MAX_INGESTION_FILES = 300
@@ -350,17 +351,18 @@ async def generate_task_plan(
     }
 
     try:
-        raw_response = await generate_text(
-            instructions=PLANNING_INSTRUCTIONS,
-            prompt=(
-                "Create an implementation plan using the following "
-                "JSON input. Follow the required output structure.\n\n"
-                + json.dumps(
-                    input_data,
-                    ensure_ascii=False,
-                )
-            ),
-        )
+        with ai_usage_context(operation="task_planning"):
+            raw_response = await generate_text(
+                instructions=PLANNING_INSTRUCTIONS,
+                prompt=(
+                    "Create an implementation plan using the following "
+                    "JSON input. Follow the required output structure.\n\n"
+                    + json.dumps(
+                        input_data,
+                        ensure_ascii=False,
+                    )
+                ),
+            )
 
     except AIProviderError:
         raise

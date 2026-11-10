@@ -15,6 +15,7 @@ from app.services.workspace import (
     WorkspaceReadError,
     read_configured_workspace_file,
 )
+from app.core.ai_usage_context import ai_usage_context
 
 
 MAX_PATCH_INPUT_CHARACTERS = 100_000
@@ -189,14 +190,15 @@ async def generate_code_patch(
     }
 
     try:
-        raw_result = await generate_text(
-            instructions=PATCH_INSTRUCTIONS,
-            prompt=(
-                "Propose the smallest appropriate fix for the finding "
-                "in the following JSON input. Return the complete file.\n\n"
-                + json.dumps(input_data, ensure_ascii=False)
-            ),
-        )
+        with ai_usage_context(operation="code_patch"):
+            raw_result = await generate_text(
+                instructions=PATCH_INSTRUCTIONS,
+                prompt=(
+                    "Propose the smallest appropriate fix for the finding "
+                    "in the following JSON input. Return the complete file.\n\n"
+                    + json.dumps(input_data, ensure_ascii=False)
+                ),
+            )
     except AIProviderError:
         raise
 

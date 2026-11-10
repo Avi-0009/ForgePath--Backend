@@ -1,4 +1,4 @@
-
+from collections.abc import AsyncGenerator
 from typing import Annotated
 from uuid import UUID
 from datetime import datetime, timezone
@@ -9,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
+from app.core.ai_usage_context import ai_usage_context
 from app.db.session import get_db
 from app.models.user import User
 from app.repositories import user as user_repository
@@ -72,6 +73,19 @@ async def get_current_user(
         raise unauthorized
 
     return user
+
+
+async def get_current_user_with_usage_context(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AsyncGenerator[User, None]:
+    """Authenticate a user and scope subsequent telemetry to that user.
+
+    The context is always reset after the request, preventing identity leakage
+    between concurrent or reused async tasks.
+    """
+
+    with ai_usage_context(user_id=current_user.id):
+        yield current_user
 
 
 def get_workspace_indexing_service(

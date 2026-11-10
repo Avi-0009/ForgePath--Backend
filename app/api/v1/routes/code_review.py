@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user_with_usage_context
 from app.core.ai_provider import AIProviderError
 from app.models.user import User
 from app.schemas.code_review import (
@@ -45,7 +45,7 @@ async def create_code_review(
     payload: CodeReviewRequest,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
 ) -> CodeReviewResponse:
     """Review submitted code without modifying the original source."""
@@ -85,7 +85,7 @@ async def review_local_file(
     request: Request,
     _current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
 ) -> CodeReviewFileResponse:
     """Review a permitted local file without modifying it."""

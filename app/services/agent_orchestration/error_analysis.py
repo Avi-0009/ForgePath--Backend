@@ -7,6 +7,9 @@ from typing import Any
 from app.core.ai_provider import AIProviderError, generate_text
 from app.schemas.error_analysis import TestFailureAnalysis
 from app.services.workspace_ingestion import ingest_workspace
+from app.core.ai_usage_context import ai_usage_context
+
+
 
 
 MAX_ANALYSIS_FILES = 300
@@ -183,8 +186,8 @@ async def analyze_test_failure(
             "No supported project files were found for error analysis."
         )
 
-    stdout = _sanitize_output(test_result.get("stdout"))
-    stderr = _sanitize_output(test_result.get("stderr"))
+    stdout = sanitize_test_output(test_result.get("stdout"))
+    stderr = sanitize_test_output(test_result.get("stderr"))
 
     command = test_result.get("command", [])
 
@@ -214,13 +217,14 @@ async def analyze_test_failure(
     }
 
     try:
-        response = await generate_text(
-            instructions=INSTRUCTIONS,
-            prompt=json.dumps(
-                prompt_data,
-                ensure_ascii=False,
-            ),
-        )
+        with ai_usage_context(operation="test_failure_analysis"):
+            response = await generate_text(
+                instructions=INSTRUCTIONS,
+                prompt=json.dumps(
+                    prompt_data,
+                    ensure_ascii=False,
+                ),
+            )
 
         raw_analysis = _extract_json(response)
 

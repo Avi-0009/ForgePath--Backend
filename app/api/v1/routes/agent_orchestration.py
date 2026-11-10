@@ -12,8 +12,9 @@ from fastapi import (
 )
 from langgraph.types import Command
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user_with_usage_context
 from app.core.ai_provider import AIProviderError
+from app.core.ai_usage_context import ai_usage_context
 from app.models.user import User
 from app.schemas.agent_orchestration import (
     AgentAppliedPatch,
@@ -231,7 +232,7 @@ async def start_agent_workflow(
     request: Request,
     current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentWorkflowResponse:
@@ -281,10 +282,14 @@ async def start_agent_workflow(
             test_runner=payload.test_runner,
         )
 
-        await runtime.graph.ainvoke(
-            initial_state,
-            config=_get_config(thread_id),
-        )
+        with ai_usage_context(
+            thread_id=thread_uuid,
+            operation="agent_workflow",
+        ):
+            await runtime.graph.ainvoke(
+                initial_state,
+                config=_get_config(thread_id),
+            )
 
         snapshot = await runtime.graph.aget_state(
             _get_config(thread_id)
@@ -340,7 +345,7 @@ async def start_agent_workflow(
 async def list_agent_workflows(
     current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(default=20, ge=1, le=100),
@@ -381,7 +386,7 @@ async def get_agent_workflow_history_record(
     thread_id: str,
     current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentWorkflowHistoryItem:
@@ -421,7 +426,7 @@ async def get_agent_workflow(
     request: Request,
     current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentWorkflowResponse:
@@ -466,7 +471,7 @@ async def resume_agent_workflow(
     request: Request,
     current_user: Annotated[
         User,
-        Depends(get_current_user),
+        Depends(get_current_user_with_usage_context),
     ],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentWorkflowResponse:
@@ -518,10 +523,14 @@ async def resume_agent_workflow(
     )
 
     try:
-        await runtime.graph.ainvoke(
-            Command(resume=resume_value),
-            config=_get_config(normalized_thread_id),
-        )
+        with ai_usage_context(
+            thread_id=UUID(normalized_thread_id),
+            operation="agent_workflow",
+        ):
+            await runtime.graph.ainvoke(
+                Command(resume=resume_value),
+                config=_get_config(normalized_thread_id),
+            )
 
         updated_snapshot = await runtime.graph.aget_state(
             _get_config(normalized_thread_id)
