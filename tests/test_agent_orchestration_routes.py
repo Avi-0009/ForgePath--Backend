@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from uuid import uuid4
+from datetime import datetime, timezone
 
 import pytest
 
@@ -10,6 +11,7 @@ from langgraph.types import Command
 from app.api.dependencies import get_current_user
 from app.api.v1.routes.agent_orchestration import router
 from app.db.session import get_db
+from app.api.v1.routes import agent_orchestration as agent_orchestration_routes
 
 
 WORKFLOW_URL = "/api/v1/agent/workflows"
@@ -87,8 +89,8 @@ class FakeRuntimeManager:
 
 
 @pytest.fixture
-def api_client():
-    """Create an isolated API application with a fake graph."""
+def api_client(monkeypatch):
+    """Create an isolated API application with fake graph and history storage."""
 
     test_app = FastAPI()
 
@@ -99,11 +101,125 @@ def api_client():
 
     graph = FakeGraph()
 
-    test_app.state.agent_runtime_manager = (
-        FakeRuntimeManager(graph)
-    )
+    test_app.state.agent_runtime_manager = FakeRuntimeManager(graph)
 
     test_user_id = uuid4()
+    history_records = {}
+
+    async def fake_create_history(_db, **kwargs):
+        now = datetime.now(timezone.utc)
+
+        record = SimpleNamespace(
+            id=uuid4(),
+            created_at=now,
+            updated_at=now,
+            finished_at=None,
+            status="running",
+            message=None,
+            total_steps=0,
+            completed_steps=0,
+            repair_attempts=0,
+            **kwargs,
+        )
+
+        history_records[record.thread_id] = record
+        return record
+
+    async def fake_sync_history(_db, record, state):
+        now = datetime.now(timezone.utc)
+
+        record.status = state.get("status", "running")
+        record.message = (state.get("message") or "")[:2000] or None
+
+        plan = state.get("plan")
+        if isinstance(plan, dict):
+            record.total_steps = len(plan.get("steps", []))
+
+        record.completed_steps = len(
+            set(state.get("completed_steps", []))
+        )
+
+        record.repair_attempts = state.get("repair_attempts", 0)
+        record.updated_at = now
+
+        terminal_statuses = {
+            "completed",
+            "completed_without_tests",
+            "tests_failed",
+            "cancelled",
+            "failed",
+        }
+
+        if record.status in terminal_statuses:
+            if record.finished_at is None:
+                record.finished_at = now
+        else:
+            record.finished_at = None
+
+        return record
+
+    async def fake_get_history(_db, *, user_id, thread_id):
+        record = history_records.get(thread_id)
+
+        if record is None or record.user_id != user_id:
+            return None
+
+        return record
+
+    async def fake_list_history(
+        _db,
+        *,
+        user_id,
+        limit=20,
+        offset=0,
+        status=None,
+    ):
+        records = [
+            record
+            for record in history_records.values()
+            if record.user_id == user_id
+            and (status is None or record.status == status)
+        ]
+
+        records.sort(
+            key=lambda record: (
+                record.created_at,
+                str(record.id),
+            ),
+            reverse=True,
+        )
+
+        total = len(records)
+
+        return records[offset:offset + limit], total
+
+    # Mock the persistence functions used by the API routes.
+    monkeypatch.setattr(
+        agent_orchestration_routes,
+        "create_agent_workflow_history",
+        fake_create_history,
+    )
+
+    monkeypatch.setattr(
+        agent_orchestration_routes,
+        "sync_agent_workflow_history",
+        fake_sync_history,
+    )
+
+    monkeypatch.setattr(
+        agent_orchestration_routes,
+        "get_agent_workflow_history",
+        fake_get_history,
+    )
+
+    monkeypatch.setattr(
+        agent_orchestration_routes,
+        "list_agent_workflow_history",
+        fake_list_history,
+    )
+
+    test_app.state.history_records = history_records
+    test_app.state.current_user_id = test_user_id
 
     async def override_current_user():
         return SimpleNamespace(
@@ -113,8 +229,6 @@ def api_client():
 
     async def override_db():
         yield SimpleNamespace()
-
-    test_app.state.current_user_id = test_user_id
 
     test_app.dependency_overrides[get_current_user] = (
         override_current_user
@@ -301,3 +415,150 @@ def test_agent_workflow_rejects_invalid_thread_id(api_client):
     )
 
     assert response.status_code == 404
+
+
+def test_list_agent_workflow_history(api_client):
+    client, _test_app, _graph = api_client
+
+    workflow = start_workflow(client)
+
+    response = client.get(
+        f"{WORKFLOW_URL}/history",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total"] == 1
+    assert data["limit"] == 20
+    assert data["offset"] == 0
+    assert len(data["items"]) == 1
+
+    item = data["items"][0]
+
+    assert item["thread_id"] == workflow["thread_id"]
+    assert item["workspace_root"] == "C:/allowed/project"
+    assert item["status"] == "awaiting_plan_approval"
+    assert item["repair_attempts"] == 0
+    assert item["finished_at"] is None
+
+
+def test_get_agent_workflow_history_record(api_client):
+    client, _test_app, _graph = api_client
+
+    workflow = start_workflow(client)
+
+    response = client.get(
+        f"{WORKFLOW_URL}/history/{workflow['thread_id']}",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["thread_id"] == workflow["thread_id"]
+    assert data["task_description"] == (
+        "Add a user data export endpoint."
+    )
+    assert data["planning_mode"] == "feature"
+    assert data["test_runner"] == "pytest"
+    assert data["status"] == "awaiting_plan_approval"
+
+
+def test_history_status_filter_and_sync(api_client):
+    client, _test_app, _graph = api_client
+
+    workflow = start_workflow(client)
+
+    # Resume the workflow, changing its status to running.
+    resume_response = client.post(
+        f"{WORKFLOW_URL}/{workflow['thread_id']}/resume",
+        json={"action": "approve"},
+    )
+
+    assert resume_response.status_code == 200
+
+    running_response = client.get(
+        f"{WORKFLOW_URL}/history",
+        params={"status": "running"},
+    )
+
+    assert running_response.status_code == 200
+    assert running_response.json()["total"] == 1
+    assert running_response.json()["items"][0]["status"] == "running"
+
+    waiting_response = client.get(
+        f"{WORKFLOW_URL}/history",
+        params={"status": "awaiting_plan_approval"},
+    )
+
+    assert waiting_response.status_code == 200
+    assert waiting_response.json()["total"] == 0
+
+
+def test_history_is_isolated_by_user(api_client):
+    client, test_app, _graph = api_client
+
+    workflow = start_workflow(client)
+
+    # Switch to another authenticated user.
+    test_app.state.current_user_id = uuid4()
+
+    list_response = client.get(
+        f"{WORKFLOW_URL}/history",
+    )
+
+    assert list_response.status_code == 200
+    assert list_response.json()["total"] == 0
+    assert list_response.json()["items"] == []
+
+    detail_response = client.get(
+        f"{WORKFLOW_URL}/history/{workflow['thread_id']}",
+    )
+
+    assert detail_response.status_code == 404
+
+
+def test_history_pagination(api_client):
+    client, _test_app, _graph = api_client
+
+    first_workflow = start_workflow(client)
+    second_workflow = start_workflow(client)
+
+    response = client.get(
+        f"{WORKFLOW_URL}/history",
+        params={
+            "limit": 1,
+            "offset": 0,
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total"] == 2
+    assert data["limit"] == 1
+    assert data["offset"] == 0
+    assert len(data["items"]) == 1
+
+    # The two records must be distinct.
+    assert first_workflow["thread_id"] != second_workflow["thread_id"]
+
+    next_page = client.get(
+        f"{WORKFLOW_URL}/history",
+        params={
+            "limit": 1,
+            "offset": 1,
+        },
+    )
+
+    assert next_page.status_code == 200
+    assert next_page.json()["total"] == 2
+    assert len(next_page.json()["items"]) == 1
+
+    assert (
+        data["items"][0]["thread_id"]
+        != next_page.json()["items"][0]["thread_id"]
+    )

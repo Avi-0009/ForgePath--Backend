@@ -9,6 +9,8 @@ from app.schemas.task_planning import (
     TaskPlanningResponse,
 )
 from app.schemas.error_analysis import TestFailureAnalysis
+from datetime import datetime
+from uuid import UUID
 
 
 AgentWorkflowStatus = Literal[
@@ -168,3 +170,39 @@ class AgentWorkflowResponse(BaseModel):
         ge=0,
         le=5,
     )
+
+
+class AgentWorkflowHistoryItem(BaseModel):
+    """A compact workflow execution history record."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    thread_id: UUID
+
+    workspace_root: str
+    task_description: str
+
+    planning_mode: str
+    test_runner: str
+
+    status: AgentWorkflowStatus
+    message: str | None = None
+
+    total_steps: int = Field(default=0, ge=0)
+    completed_steps: int = Field(default=0, ge=0)
+    repair_attempts: int = Field(default=0, ge=0)
+
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+
+class AgentWorkflowHistoryListResponse(BaseModel):
+    """Paginated workflow history response."""
+
+    items: list[AgentWorkflowHistoryItem]
+
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)

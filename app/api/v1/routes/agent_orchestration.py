@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from fastapi import (
     APIRouter,
     Depends,
+    Query,
     HTTPException,
     Request,
     status,
@@ -20,6 +21,9 @@ from app.schemas.agent_orchestration import (
     AgentWorkflowResponse,
     AgentWorkflowResumeRequest,
     AgentWorkflowStartRequest,
+    AgentWorkflowHistoryItem,
+    AgentWorkflowHistoryListResponse,
+    AgentWorkflowStatus,
 )
 from app.schemas.code_patch import CodePatchResponse
 from app.schemas.execution import TestExecutionResponse
@@ -28,6 +32,15 @@ from app.services.agent_orchestration.runtime import (
     AgentRuntimeError,
 )
 from app.schemas.error_analysis import TestFailureAnalysis
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import get_db
+from app.services.agent_workflow_history import (
+    create_agent_workflow_history,
+    get_agent_workflow_history,
+    list_agent_workflow_history,
+    sync_agent_workflow_history,
+)
+
 
 
 logger = logging.getLogger(__name__)
@@ -207,6 +220,7 @@ def _build_workflow_response(
     )
 
 
+
 @router.post(
     "",
     response_model=AgentWorkflowResponse,
@@ -219,12 +233,14 @@ async def start_agent_workflow(
         User,
         Depends(get_current_user),
     ],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentWorkflowResponse:
-    """Start a new resumable agent workflow."""
+    """Start a new resumable agent workflow and record its history."""
 
     runtime = await _get_runtime(request)
 
-    thread_id = str(uuid4())
+    thread_uuid = uuid4()
+    thread_id = str(thread_uuid)
 
     initial_state = {
         "thread_id": thread_id,
@@ -252,7 +268,19 @@ async def start_agent_workflow(
         "error_message": None,
     }
 
+    history_record = None
+
     try:
+        history_record = await create_agent_workflow_history(
+            db,
+            thread_id=thread_uuid,
+            user_id=current_user.id,
+            workspace_root=payload.workspace_root,
+            task_description=payload.task_description,
+            planning_mode=payload.planning_mode,
+            test_runner=payload.test_runner,
+        )
+
         await runtime.graph.ainvoke(
             initial_state,
             config=_get_config(thread_id),
@@ -260,6 +288,12 @@ async def start_agent_workflow(
 
         snapshot = await runtime.graph.aget_state(
             _get_config(thread_id)
+        )
+
+        await sync_agent_workflow_history(
+            db,
+            history_record,
+            snapshot.values,
         )
 
         return _build_workflow_response(
@@ -273,10 +307,108 @@ async def start_agent_workflow(
             thread_id,
         )
 
+        # Record a failed start instead of leaving stale "running" history.
+        if history_record is not None:
+            try:
+                await sync_agent_workflow_history(
+                    db,
+                    history_record,
+                    {
+                        "status": "failed",
+                        "message": "Could not start the agent workflow.",
+                        "completed_steps": [],
+                        "repair_attempts": 0,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Could not update failed workflow history %s.",
+                    thread_id,
+                )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not start the agent workflow.",
         ) from None
+
+
+@router.get(
+    "/history",
+    response_model=AgentWorkflowHistoryListResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def list_agent_workflows(
+    current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    workflow_status: AgentWorkflowStatus | None = Query(
+        default=None,
+        alias="status",
+    ),
+) -> AgentWorkflowHistoryListResponse:
+    """List the authenticated user's agent workflow history."""
+
+    records, total = await list_agent_workflow_history(
+        db,
+        user_id=current_user.id,
+        limit=limit,
+        offset=offset,
+        status=workflow_status,
+    )
+
+    return AgentWorkflowHistoryListResponse(
+        items=[
+            AgentWorkflowHistoryItem.model_validate(record)
+            for record in records
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+
+@router.get(
+    "/history/{thread_id}",
+    response_model=AgentWorkflowHistoryItem,
+    status_code=status.HTTP_200_OK,
+)
+async def get_agent_workflow_history_record(
+    thread_id: str,
+    current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AgentWorkflowHistoryItem:
+    """Retrieve one history record belonging to the authenticated user."""
+
+    try:
+        workflow_uuid = UUID(thread_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow history not found.",
+        ) from None
+
+    record = await get_agent_workflow_history(
+        db,
+        user_id=current_user.id,
+        thread_id=workflow_uuid,
+    )
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow history not found.",
+        )
+
+    return AgentWorkflowHistoryItem.model_validate(record)
+
 
 
 @router.get(
@@ -291,8 +423,9 @@ async def get_agent_workflow(
         User,
         Depends(get_current_user),
     ],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentWorkflowResponse:
-    """Retrieve the latest state of an owned agent workflow."""
+    """Retrieve an owned workflow and synchronize its history."""
 
     runtime = await _get_runtime(request)
 
@@ -302,10 +435,24 @@ async def get_agent_workflow(
         str(current_user.id),
     )
 
+    history_record = await get_agent_workflow_history(
+        db,
+        user_id=current_user.id,
+        thread_id=UUID(normalized_thread_id),
+    )
+
+    if history_record is not None:
+        await sync_agent_workflow_history(
+            db,
+            history_record,
+            snapshot.values,
+        )
+
     return _build_workflow_response(
         normalized_thread_id,
         snapshot.values,
     )
+
 
 
 @router.post(
@@ -321,8 +468,9 @@ async def resume_agent_workflow(
         User,
         Depends(get_current_user),
     ],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentWorkflowResponse:
-    """Resume a paused workflow with a validated user decision."""
+    """Resume a workflow and synchronize its execution history."""
 
     runtime = await _get_runtime(request)
 
@@ -337,27 +485,19 @@ async def resume_agent_workflow(
 
     allowed_actions = {
         "awaiting_plan_approval": {
-            "approve",
-            "reject",
-            "cancel",
+            "approve", "reject", "cancel",
         },
         "awaiting_file_selection": {
-            "select_file",
-            "cancel",
+            "select_file", "cancel",
         },
         "awaiting_patch_approval": {
-            "approve",
-            "reject",
-            "cancel",
+            "approve", "reject", "cancel",
         },
         "awaiting_test_approval": {
-            "approve",
-            "reject",
-            "cancel",
+            "approve", "reject", "cancel",
         },
         "awaiting_repair_file_selection": {
-            "select_file",
-            "cancel",
+            "select_file", "cancel",
         },
     }
 
@@ -397,6 +537,19 @@ async def resume_agent_workflow(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Workflow not found.",
+            )
+
+        history_record = await get_agent_workflow_history(
+            db,
+            user_id=current_user.id,
+            thread_id=UUID(normalized_thread_id),
+        )
+
+        if history_record is not None:
+            await sync_agent_workflow_history(
+                db,
+                history_record,
+                updated_values,
             )
 
         return _build_workflow_response(
