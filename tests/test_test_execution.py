@@ -4,6 +4,7 @@ import subprocess
 
 import pytest
 
+from pathlib import Path
 from app.core.config import settings
 from app.services.test_execution import runner
 from app.services.workspace import WorkspaceAccessDenied
@@ -254,3 +255,117 @@ def test_execution_handles_timeout(
     assert result.status == "timed_out"
     assert result.exit_code is None
     assert "partial output" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "package_content",
+    [
+        "[]",
+        '"invalid package"',
+        '{"scripts": {"test": 123}}',
+        '{"scripts": {"test": "   "}}',
+        '{"scripts": []}',
+        '{"scripts": {"build": "vite build"}}',
+    ],
+)
+def test_npm_command_rejects_invalid_package_metadata(
+    workspace,
+    package_content,
+):
+    package_file = workspace / "package.json"
+    package_file.write_text(package_content, encoding="utf-8")
+
+    with pytest.raises(runner.TestProjectConfigurationError):
+        runner._build_command(workspace, "npm")
+
+
+def test_pytest_command_rejects_symlinked_python_executable(
+    workspace,
+    monkeypatch,
+):
+    relative_path = (
+        ".venv/Scripts/python.exe"
+        if runner.os.name == "nt"
+        else ".venv/bin/python"
+    )
+
+    executable = workspace / relative_path
+    executable.parent.mkdir(parents=True)
+    executable.write_text("fake executable", encoding="utf-8")
+
+    original_is_symlink = Path.is_symlink
+
+    def fake_is_symlink(path):
+        if path == executable:
+            return True
+
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+    with pytest.raises(runner.TestProjectConfigurationError):
+        runner._build_command(workspace, "pytest")
+
+
+def test_npm_command_rejects_symlinked_package_json(
+    workspace,
+    monkeypatch,
+):
+    package_file = workspace / "package.json"
+    package_file.write_text(
+        '{"scripts": {"test": "vitest run"}}',
+        encoding="utf-8",
+    )
+
+    original_is_symlink = Path.is_symlink
+
+    def fake_is_symlink(path):
+        if path == package_file:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+    with pytest.raises(runner.TestProjectConfigurationError):
+        runner._build_command(workspace, "npm")
+
+
+def test_go_command_rejects_symlinked_go_mod(
+    workspace,
+    monkeypatch,
+):
+    go_mod = workspace / "go.mod"
+    go_mod.write_text(
+        "module example.com/test\n\ngo 1.23\n",
+        encoding="utf-8",
+    )
+
+    original_is_symlink = Path.is_symlink
+
+    def fake_is_symlink(path):
+        if path == go_mod:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+    with pytest.raises(runner.TestProjectConfigurationError):
+        runner._build_command(workspace, "go")
+
+
+@pytest.mark.parametrize(
+    "unsupported_runner",
+    [
+        "powershell",
+        "bash",
+        "cmd.exe",
+        "pytest && whoami",
+        "npm --prefix ..",
+    ],
+)
+def test_build_command_rejects_unsupported_runner(
+    workspace,
+    unsupported_runner,
+):
+    with pytest.raises(runner.TestProjectConfigurationError):
+        runner._build_command(workspace, unsupported_runner)

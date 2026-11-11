@@ -221,3 +221,27 @@ def test_test_execution_rejects_extra_request_fields(api_client):
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "unsupported_runner",
+    [
+        "powershell",
+        "bash",
+        "cmd.exe",
+        "pytest && whoami",
+    ],
+)
+def test_test_execution_rejects_unsupported_runner(
+    api_client,
+    unsupported_runner,
+):
+    payload = make_payload()
+    payload["runner"] = unsupported_runner
+
+    response = api_client.post(
+        TEST_URL,
+        json=payload,
+    )
+
+    assert response.status_code == 422

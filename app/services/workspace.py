@@ -22,6 +22,12 @@ EXCLUDED_DIRECTORIES = {
     ".ruff_cache",
     "dist",
     "build",
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".kube",
+    ".docker",
 }
 
 SENSITIVE_FILENAMES = {
@@ -31,6 +37,16 @@ SENSITIVE_FILENAMES = {
     "id_rsa",
     "id_ed25519",
     "pgadmin-servers.json",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+    "credentials",
+    "secrets",
+    "id_ecdsa",
+    "id_dsa",
+    "id_ed25519_sk",
+    "id_ecdsa_sk",
 }
 
 SENSITIVE_SUFFIXES = {
@@ -38,6 +54,7 @@ SENSITIVE_SUFFIXES = {
     ".key",
     ".p12",
     ".pfx",
+    ".ppk",
 }
 
 LANGUAGE_BY_EXTENSION = {
@@ -191,6 +208,30 @@ def resolve_allowed_workspace_root(
         configured_absolute = Path(
             os.path.abspath(configured_path)
         )
+
+        try:
+            root_is_link = configured_absolute.is_symlink()
+
+            junction_check = getattr(
+                configured_absolute,
+                "is_junction",
+                None,
+            )
+
+            root_is_junction = bool(
+                junction_check and junction_check()
+            )
+
+        except OSError:
+            raise WorkspaceConfigurationError(
+                "Could not safely validate a configured workspace root."
+            ) from None
+
+        if root_is_link or root_is_junction:
+            raise WorkspaceConfigurationError(
+                "Configured workspace roots cannot be symbolic links "
+                "or directory junctions."
+            )
 
         resolved_candidates.append(
             (configured_absolute, resolved_allowed)

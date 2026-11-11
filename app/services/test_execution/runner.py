@@ -17,6 +17,8 @@ from app.core.config import settings
 from app.services.workspace import (
     WorkspaceAccessDenied,
     WorkspaceConfigurationError,
+    WorkspaceReadError,
+    read_configured_workspace_file,
     resolve_allowed_workspace_root,
 )
 
@@ -131,38 +133,37 @@ def _resolve_workspace(workspace_root: str | Path) -> Path:
 def _validate_npm_project(workspace_root: Path) -> None:
     """Ensure the project defines an npm test script."""
 
-    package_file = workspace_root / "package.json"
-
-    if package_file.is_symlink() or not package_file.is_file():
-        raise TestProjectConfigurationError(
-            "The selected workspace does not contain a valid package.json."
-        )
-
     try:
-        resolved_package_file = package_file.resolve(strict=True)
-
-        if not resolved_package_file.is_relative_to(workspace_root):
-            raise TestProjectConfigurationError(
-                "The package.json file is outside the selected workspace."
-            )
-
-        package_data = json.loads(
-            resolved_package_file.read_text(encoding="utf-8")
+        package_content = _read_project_metadata_file(
+            workspace_root,
+            "package.json",
         )
+        package_data = json.loads(package_content)
 
     except TestProjectConfigurationError:
         raise
 
-    except (OSError, ValueError, UnicodeError):
+    except (ValueError, UnicodeError):
         raise TestProjectConfigurationError(
-            "The project's package.json could not be read."
+            "The project's package.json contains invalid JSON."
         ) from None
+
+    if not isinstance(package_data, dict):
+        raise TestProjectConfigurationError(
+            "The project's package.json must contain a JSON object."
+        )
 
     scripts = package_data.get("scripts", {})
 
-    if not isinstance(scripts, dict) or not scripts.get("test"):
+    test_script = (
+        scripts.get("test")
+        if isinstance(scripts, dict)
+        else None
+    )
+
+    if not isinstance(test_script, str) or not test_script.strip():
         raise TestProjectConfigurationError(
-            "The project's package.json does not define a test script."
+            "The project's package.json does not define a valid test script."
         )
 
 
@@ -189,8 +190,13 @@ def _build_command(
             ]
 
         for candidate in candidates:
-            if candidate.is_file():
-                python_executable = str(candidate)
+            validated_candidate = _resolve_project_python_executable(
+                workspace_root,
+                candidate,
+            )
+
+            if validated_candidate is not None:
+                python_executable = str(validated_candidate)
                 break
 
         return [
@@ -217,12 +223,10 @@ def _build_command(
         ]
 
     if runner == "go":
-        go_mod = workspace_root / "go.mod"
-
-        if go_mod.is_symlink() or not go_mod.is_file():
-            raise TestProjectConfigurationError(
-                "The selected workspace does not contain a valid go.mod."
-            )
+        _read_project_metadata_file(
+            workspace_root,
+            "go.mod",
+        )
 
         return [
             "go",
@@ -233,6 +237,111 @@ def _build_command(
     raise TestProjectConfigurationError(
         "The requested test runner is not supported."
     )
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+
+    junction_check = getattr(path, "is_junction", None)
+    return bool(junction_check and junction_check())
+
+
+def _resolve_project_python_executable(
+    workspace_root: Path,
+    candidate: Path,
+) -> Path | None:
+    """Accept only a real Python executable inside the workspace."""
+
+    root = workspace_root.resolve(strict=True)
+    current = workspace_root
+
+    try:
+        relative_parts = candidate.relative_to(workspace_root).parts
+
+        for part in relative_parts:
+            current = current / part
+
+            if _is_link_or_junction(current):
+                raise TestProjectConfigurationError(
+                    "Project Python executables cannot use symbolic links "
+                    "or directory junctions."
+                )
+
+            if not current.exists():
+                return None
+
+        resolved = candidate.resolve(strict=True)
+
+    except TestProjectConfigurationError:
+        raise
+
+    except (OSError, RuntimeError, ValueError):
+        raise TestProjectConfigurationError(
+            "The project Python executable could not be safely validated."
+        ) from None
+
+    if not resolved.is_relative_to(root) or not resolved.is_file():
+        raise TestProjectConfigurationError(
+            "The project Python executable must be a regular file "
+            "inside the selected workspace."
+        )
+
+    return resolved
+
+
+def _read_project_metadata_file(
+    workspace_root: Path,
+    filename: str,
+) -> str:
+    """Read project metadata using the secure workspace reader."""
+
+    metadata_path = workspace_root / filename
+
+    try:
+        if _is_link_or_junction(metadata_path) or not metadata_path.is_file():
+            raise TestProjectConfigurationError(
+                f"The project does not contain a valid {filename}."
+            )
+
+        resolved_root = workspace_root.resolve(strict=True)
+        resolved_path = metadata_path.resolve(strict=True)
+
+        if (
+            not resolved_path.is_relative_to(resolved_root)
+            or not resolved_path.is_file()
+        ):
+            raise TestProjectConfigurationError(
+                f"The {filename} file is outside the selected workspace."
+            )
+
+        source = read_configured_workspace_file(
+            workspace_root=workspace_root,
+            relative_path=filename,
+        )
+
+        if (
+            _is_link_or_junction(metadata_path)
+            or metadata_path.resolve(strict=True) != resolved_path
+        ):
+            raise TestProjectConfigurationError(
+                f"The {filename} path changed during validation."
+            )
+
+        return source.content
+
+    except TestProjectConfigurationError:
+        raise
+
+    except WorkspaceReadError:
+        raise TestProjectConfigurationError(
+            f"The {filename} file could not be safely read."
+        ) from None
+
+    except (OSError, RuntimeError, ValueError):
+        raise TestProjectConfigurationError(
+            f"The {filename} file could not be safely validated."
+        ) from None
 
 
 def _build_test_environment() -> dict[str, str]:

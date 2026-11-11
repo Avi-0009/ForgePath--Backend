@@ -1,5 +1,6 @@
 import hashlib
 import pytest
+from pathlib import Path
 
 from app.services.workspace import (
     WorkspaceAccessDenied,
@@ -9,6 +10,7 @@ from app.services.workspace import (
     WorkspaceInvalidPath,
     read_workspace_file,
 )
+from app.services.workspace import resolve_allowed_workspace_root
 
 
 def test_reads_file_and_returns_metadata(tmp_path):
@@ -80,6 +82,20 @@ def test_rejects_parent_directory_traversal(tmp_path):
         "node_modules/package.json",
         "credentials.json",
         "private.key",
+        ".ssh/id_ed25519",
+        ".aws/credentials",
+        ".azure/accessTokens.json",
+        ".gnupg/private-keys-v1.d/key",
+        ".kube/config",
+        ".docker/config.json",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".git-credentials",
+        "id_ecdsa",
+        "private.ppk",
+        "credentials.txt",
+        "secrets.yaml",
     ],
 )
 def test_rejects_sensitive_or_excluded_paths(
@@ -167,4 +183,49 @@ def test_rejects_invalid_configured_workspace_root(tmp_path):
             workspace_root=root,
             relative_path="main.py",
             allowed_workspace_roots=[root, missing_root],
+        )
+
+
+def test_rejects_workspace_root_that_is_symlink(tmp_path):
+    actual_root = tmp_path / "actual"
+    actual_root.mkdir()
+
+    linked_root = tmp_path / "linked-root"
+
+    try:
+        linked_root.symlink_to(
+            actual_root,
+            target_is_directory=True,
+        )
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is unavailable on this system.")
+
+    with pytest.raises(WorkspaceConfigurationError):
+        resolve_allowed_workspace_root(
+            workspace_root=linked_root,
+            allowed_workspace_roots=[linked_root],
+        )
+
+
+def test_rejects_workspace_root_marked_as_symlink(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "project"
+    root.mkdir()
+
+    original_is_symlink = Path.is_symlink
+
+    def fake_is_symlink(path):
+        if path == root:
+            return True
+
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+    with pytest.raises(WorkspaceConfigurationError):
+        resolve_allowed_workspace_root(
+            workspace_root=root,
+            allowed_workspace_roots=[root],
         )
