@@ -413,153 +413,42 @@ def execute_tests(
     runner: TestRunner,
     timeout_seconds: int = 120,
 ) -> TestExecutionResult:
-    """
-    Execute a predefined project test command locally.
-
-    Execution takes place under the backend process's OS permissions.
-    This is controlled process execution, not an OS-level sandbox.
-    """
+    """Execute tests only inside the disposable sandbox; never on the API host."""
+    from app.services.test_execution.sandbox import SandboxError, run_in_sandbox
 
     if not 1 <= timeout_seconds <= 600:
-        raise ValueError(
-            "timeout_seconds must be between 1 and 600."
-        )
-
+        raise ValueError("timeout_seconds must be between 1 and 600.")
     resolved_root = _resolve_workspace(workspace_root)
-
-    command = _build_command(
-        resolved_root,
-        runner,
-    )
-
-    execution_id = uuid4()
-
+    # Preserve existing metadata checks; no host executable is launched.
+    if runner == "npm":
+        _validate_npm_project(resolved_root)
+    elif runner == "go":
+        _read_project_metadata_file(resolved_root, "go.mod")
+    elif runner != "pytest":
+        raise TestProjectConfigurationError("Unsupported test runner.")
     started_at = datetime.now(timezone.utc)
-    start_time = time.monotonic()
-
-    stdout_capture = _BoundedOutput()
-    stderr_capture = _BoundedOutput()
-
-    environment = _build_test_environment()
-
-    # Encourage test runners to exit instead of entering watch mode.
-    environment["CI"] = "true"
-    environment["GIT_TERMINAL_PROMPT"] = "0"
-    environment["PYTHONUNBUFFERED"] = "1"
-
-    creation_options = {}
-
-    if os.name == "nt":
-        creation_options["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        creation_options["start_new_session"] = True
-
+    start = time.monotonic()
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(resolved_root),
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-            **creation_options,
+        outcome = run_in_sandbox(
+            workspace_root=resolved_root, runner=runner,
+            timeout_seconds=timeout_seconds,
         )
-
-    except FileNotFoundError:
-        raise TestRunnerUnavailable(
-            f"The {runner} test runner is not installed or not available in PATH."
-        ) from None
-
-    except OSError:
-        raise TestExecutionError(
-            "The test process could not be started."
-        ) from None
-
-    stdout_thread = threading.Thread(
-        target=stdout_capture.read_stream,
-        args=(process.stdout,),
-        daemon=True,
-    )
-
-    stderr_thread = threading.Thread(
-        target=stderr_capture.read_stream,
-        args=(process.stderr,),
-        daemon=True,
-    )
-
-    stdout_thread.start()
-    stderr_thread.start()
-
-    timed_out = False
-
-    try:
-        process.wait(timeout=timeout_seconds)
-
-    except subprocess.TimeoutExpired:
-        timed_out = True
-
-        _stop_process_tree(process)
-
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-
-    finally:
-        # On POSIX, also clean up child processes that outlive the runner.
-        if os.name != "nt" and not timed_out:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                pass
-
-        stdout_thread.join(timeout=3)
-        stderr_thread.join(timeout=3)
-
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
-
+    except SandboxError as exc:
+        raise TestExecutionError(str(exc)) from exc
     finished_at = datetime.now(timezone.utc)
-
-    duration_ms = max(
-        0,
-        int((time.monotonic() - start_time) * 1000),
+    status = "timed_out" if outcome.timed_out else (
+        "passed" if outcome.exit_code == 0 else "failed"
     )
-
-    exit_code = None if timed_out else process.returncode
-
-    if timed_out:
-        execution_status = "timed_out"
-    elif exit_code == 0:
-        execution_status = "passed"
-    else:
-        execution_status = "failed"
-
     return TestExecutionResult(
-        execution_id=execution_id,
-        workspace_root=str(resolved_root),
-        runner=runner,
-        status=execution_status,
-        command=command,
-        exit_code=exit_code,
-        duration_ms=duration_ms,
-        stdout=stdout_capture.text(),
-        stderr=stderr_capture.text(),
-        stdout_truncated=stdout_capture.truncated,
-        stderr_truncated=stderr_capture.truncated,
-        started_at=started_at,
-        finished_at=finished_at,
+        execution_id=uuid4(), workspace_root=str(resolved_root),
+        runner=runner, status=status,
+        command={"pytest": ["python", "-m", "pytest", "-q"],
+                 "npm": ["npm", "test"],
+                 "go": ["go", "test", "./..."]}[runner],
+        exit_code=outcome.exit_code,
+        duration_ms=max(0, int((time.monotonic() - start) * 1000)),
+        stdout=outcome.stdout, stderr=outcome.stderr,
+        stdout_truncated=outcome.stdout_truncated,
+        stderr_truncated=outcome.stderr_truncated,
+        started_at=started_at, finished_at=finished_at,
     )

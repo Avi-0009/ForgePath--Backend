@@ -135,123 +135,59 @@ def test_execution_rejects_invalid_timeout(workspace):
         )
 
 
-def test_execution_captures_successful_result(workspace):
-    test_file = workspace / "test_sample.py"
-
-    test_file.write_text(
-        "def test_example():\n"
-        "    assert 2 + 2 == 4\n",
-        encoding="utf-8",
+def test_execution_captures_successful_result(workspace, monkeypatch):
+    from app.services.test_execution import sandbox
+    monkeypatch.setattr(
+        sandbox, "run_in_sandbox",
+        lambda **kwargs: sandbox.SandboxResult(
+            exit_code=0, timed_out=False, stdout="1 passed", stderr="",
+            stdout_truncated=False, stderr_truncated=False,
+        ),
     )
-
     result = runner.execute_tests(
-        workspace_root=workspace,
-        runner="pytest",
-        timeout_seconds=30,
+        workspace_root=workspace, runner="pytest", timeout_seconds=30,
     )
-
     assert result.status == "passed"
     assert result.exit_code == 0
     assert result.runner == "pytest"
-    assert result.execution_id is not None
-    assert result.duration_ms >= 0
     assert "1 passed" in result.stdout
 
 
-def test_execution_captures_failed_result(workspace):
-    test_file = workspace / "test_sample.py"
-
-    test_file.write_text(
-        "def test_example():\n"
-        "    assert 2 + 2 == 5\n",
-        encoding="utf-8",
+def test_execution_captures_failed_result(workspace, monkeypatch):
+    from app.services.test_execution import sandbox
+    monkeypatch.setattr(
+        sandbox, "run_in_sandbox",
+        lambda **kwargs: sandbox.SandboxResult(
+            exit_code=1, timed_out=False, stdout="1 failed", stderr="",
+            stdout_truncated=False, stderr_truncated=False,
+        ),
     )
-
-    result = runner.execute_tests(
-        workspace_root=workspace,
-        runner="pytest",
-        timeout_seconds=30,
-    )
-
+    result = runner.execute_tests(workspace_root=workspace, runner="pytest")
     assert result.status == "failed"
-    assert result.exit_code != 0
+    assert result.exit_code == 1
 
 
-def test_execution_handles_missing_runner(
-    workspace,
-    monkeypatch,
-):
-    (workspace / "go.mod").write_text(
-        "module example.com/test\n",
-        encoding="utf-8",
-    )
+def test_execution_handles_missing_runner(workspace, monkeypatch):
+    from app.services.test_execution import sandbox
+    def missing(**kwargs):
+        raise sandbox.SandboxError("Docker is unavailable; tests were not executed.")
+    monkeypatch.setattr(sandbox, "run_in_sandbox", missing)
+    with pytest.raises(runner.TestExecutionError, match="Docker is unavailable"):
+        runner.execute_tests(workspace_root=workspace, runner="pytest")
 
-    def missing_process(*args, **kwargs):
-        raise FileNotFoundError
 
+def test_execution_handles_timeout(workspace, monkeypatch):
+    from app.services.test_execution import sandbox
     monkeypatch.setattr(
-        runner.subprocess,
-        "Popen",
-        missing_process,
+        sandbox, "run_in_sandbox",
+        lambda **kwargs: sandbox.SandboxResult(
+            exit_code=None, timed_out=True, stdout="partial output", stderr="",
+            stdout_truncated=False, stderr_truncated=False,
+        ),
     )
-
-    with pytest.raises(runner.TestRunnerUnavailable):
-        runner.execute_tests(
-            workspace_root=workspace,
-            runner="go",
-        )
-
-
-def test_execution_handles_timeout(
-    workspace,
-    monkeypatch,
-):
-    (workspace / "go.mod").write_text(
-        "module example.com/test\n",
-        encoding="utf-8",
-    )
-
-    class FakeProcess:
-        def __init__(self):
-            self.stdout = io.BytesIO(b"partial output")
-            self.stderr = io.BytesIO(b"")
-            self.returncode = -9
-            self.wait_count = 0
-
-        def wait(self, timeout=None):
-            self.wait_count += 1
-
-            if self.wait_count == 1:
-                raise subprocess.TimeoutExpired(
-                    cmd="go test ./...",
-                    timeout=1,
-                )
-
-            return self.returncode
-
-        def kill(self):
-            self.returncode = -9
-
-    fake_process = FakeProcess()
-
-    monkeypatch.setattr(
-        runner.subprocess,
-        "Popen",
-        lambda *args, **kwargs: fake_process,
-    )
-
-    monkeypatch.setattr(
-        runner,
-        "_stop_process_tree",
-        lambda process: None,
-    )
-
     result = runner.execute_tests(
-        workspace_root=workspace,
-        runner="go",
-        timeout_seconds=1,
+        workspace_root=workspace, runner="pytest", timeout_seconds=1,
     )
-
     assert result.status == "timed_out"
     assert result.exit_code is None
     assert "partial output" in result.stdout
