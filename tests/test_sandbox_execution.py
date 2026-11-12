@@ -4,11 +4,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import subprocess
+import tempfile
 
 import pytest
 
 from app.core.config import settings
 from app.services.test_execution import runner, sandbox
+from app.services.workspace import (
+    WorkspaceAccessDenied,
+    WorkspaceInvalidPath,
+    read_configured_workspace_file,
+)
 
 
 @pytest.fixture
@@ -426,3 +432,258 @@ def test_temporary_storage_limit():
 
     assert result.exit_code == 0
     assert "2 passed" in result.stdout
+
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Requires real Docker execution",
+)
+def test_real_docker_security_boundaries(workspace, monkeypatch):
+    """Verify isolation through ForgePath's real execution path."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI unavailable")
+
+    monkeypatch.setenv(
+        "FORGEPATH_TEST_SECRET",
+        "must-not-enter-sandbox",
+    )
+
+    (workspace / "test_security_boundaries.py").write_text(
+        '''
+import os
+import socket
+from pathlib import Path
+
+def test_security_boundaries():
+    # Sensitive files must not enter the snapshot.
+    assert not Path("/source/.env").exists()
+    assert not Path("/work/.env").exists()
+
+    # Backend environment secrets must not be inherited.
+    assert "FORGEPATH_TEST_SECRET" not in os.environ
+
+    # The source mount must be read-only.
+    try:
+        Path("/source/forbidden.txt").write_text("blocked")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("Source mount is writable")
+
+    # The container must not have outbound TCP access.
+    with socket.socket() as connection:
+        connection.settimeout(3)
+        result = connection.connect_ex(("1.1.1.1", 443))
+        assert result != 0, "Network access was permitted"
+
+    # Sandbox must run without root privileges.
+    assert os.getuid() != 0
+''',
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="pytest",
+        timeout_seconds=60,
+    )
+
+    assert result.status == "passed", (
+        f"STDOUT: {result.stdout}\n"
+        f"STDERR: {result.stderr}"
+    )
+
+    assert result.exit_code == 0
+    assert "2 passed" in result.stdout
+
+    # Original source must remain unchanged.
+    assert not (workspace / "forbidden.txt").exists()
+    assert (workspace / ".env").read_text() == (
+        "SECRET=never-copy\n"
+    )
+
+
+
+def test_snapshot_rejects_oversized_file(workspace):
+    from app.services.test_execution import sandbox
+
+    large_file = workspace / "oversized.py"
+    large_file.write_bytes(b"x" * (sandbox.MAX_SNAPSHOT_BYTES + 1))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(sandbox.SandboxError):
+            sandbox._snapshot(workspace, Path(tmp))
+
+
+def test_snapshot_never_copies_parent_directory(workspace):
+    from app.services.test_execution import sandbox
+
+    outside = workspace.parent / "forgepath_outside_secret.txt"
+
+    try:
+        outside.write_text(
+            "PRIVATE_DATA",
+            encoding="utf-8",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            sandbox._snapshot(workspace, destination)
+
+            copied = list(destination.rglob("*"))
+
+            assert not any(
+                item.is_file()
+                and "PRIVATE_DATA" in item.read_text(
+                    encoding="utf-8"
+                )
+                for item in copied
+            )
+
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_snapshot_excludes_nested_secrets(workspace, tmp_path):
+    """Nested environment files and credential directories must be excluded."""
+
+    nested = workspace / "src"
+    nested.mkdir()
+
+    (nested / "module.py").write_text(
+        "VALUE = 42\n",
+        encoding="utf-8",
+    )
+
+    (nested / ".env.production").write_text(
+        "PRIVATE_TOKEN=do-not-copy\n",
+        encoding="utf-8",
+    )
+
+    (nested / "credentials.json").write_text(
+        '{"secret": "do-not-copy"}',
+        encoding="utf-8",
+    )
+
+    ssh = workspace / ".ssh"
+    ssh.mkdir()
+
+    (ssh / "id_rsa").write_text(
+        "PRIVATE_KEY",
+        encoding="utf-8",
+    )
+
+    destination = tmp_path / "secure_snapshot"
+    destination.mkdir()
+
+    sandbox._snapshot(workspace, destination)
+
+    assert (destination / "src" / "module.py").exists()
+    assert not (destination / "src" / ".env.production").exists()
+    assert not (destination / "src" / "credentials.json").exists()
+    assert not (destination / ".ssh").exists()
+
+
+def test_snapshot_enforces_file_count_limit(workspace, tmp_path, monkeypatch):
+    """Snapshot must reject projects exceeding the configured file count."""
+
+    (workspace / "second.py").write_text(
+        "VALUE = 2\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sandbox,
+        "MAX_SNAPSHOT_FILES",
+        1,
+    )
+
+    destination = tmp_path / "limited_snapshot"
+    destination.mkdir()
+
+    with pytest.raises(
+        sandbox.SandboxError,
+        match="snapshot limits",
+    ):
+        sandbox._snapshot(workspace, destination)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "../outside.py",
+        "../../outside.py",
+        r"..\outside.py",
+        "/etc/passwd",
+        r"C:\Windows\system.ini",
+    ],
+)
+def test_workspace_rejects_path_traversal(workspace, relative_path):
+    """File access must reject absolute and parent-directory paths."""
+
+    with pytest.raises(
+        (WorkspaceAccessDenied, WorkspaceInvalidPath),
+    ):
+        read_configured_workspace_file(
+            workspace_root=workspace,
+            relative_path=relative_path,
+        )
+
+
+def test_docker_environment_excludes_backend_secrets(monkeypatch):
+    """Docker CLI must not inherit backend API keys or Docker host settings."""
+
+    monkeypatch.setenv(
+        "OPENAI_API_KEY",
+        "private-openai-key",
+    )
+    monkeypatch.setenv(
+        "NVIDIA_API_KEY",
+        "private-nvidia-key",
+    )
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://private",
+    )
+    monkeypatch.setenv(
+        "DOCKER_HOST",
+        "tcp://untrusted-host:2375",
+    )
+
+    environment = sandbox._docker_environment()
+
+    assert "OPENAI_API_KEY" not in environment
+    assert "NVIDIA_API_KEY" not in environment
+    assert "DATABASE_URL" not in environment
+    assert "DOCKER_HOST" not in environment
+
+
+def test_snapshot_excludes_directory_symlink(workspace, tmp_path):
+    """Directory links must not allow snapshotting files outside the project."""
+
+    outside = tmp_path / "private_directory"
+    outside.mkdir()
+
+    (outside / "secret.py").write_text(
+        "SECRET = 'private'\n",
+        encoding="utf-8",
+    )
+
+    linked = workspace / "linked_directory"
+
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip(
+            "Directory symlink creation is not permitted on this system"
+        )
+
+    destination = tmp_path / "link_snapshot"
+    destination.mkdir()
+
+    sandbox._snapshot(workspace, destination)
+
+    assert not (destination / "linked_directory").exists()
+    assert not (destination / "linked_directory" / "secret.py").exists()
