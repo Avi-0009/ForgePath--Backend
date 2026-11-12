@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+import subprocess
 
 import pytest
 
@@ -164,3 +165,264 @@ def test_container_cleanup_detects_docker_failure(monkeypatch):
         match="could not confirm",
     ):
         sandbox._verify_container_cleanup("test-container")
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Requires real Docker execution",
+)
+def test_real_docker_execution_timeout(workspace):
+    """Long-running tests must time out without modifying the workspace."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI unavailable")
+
+    slow_test = workspace / "test_slow.py"
+
+    slow_test.write_text(
+        "import time\n"
+        "\n"
+        "def test_slow_execution():\n"
+        "    time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="pytest",
+        timeout_seconds=3,
+    )
+
+    assert result.status == "timed_out"
+    assert result.exit_code is None
+
+    assert slow_test.read_text(encoding="utf-8") == (
+        "import time\n"
+        "\n"
+        "def test_slow_execution():\n"
+        "    time.sleep(30)\n"
+    )
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Requires real Docker execution",
+)
+def test_real_docker_resource_limits(workspace):
+    """Verify resource limits from inside the actual container."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI unavailable")
+
+    resource_test = workspace / "test_resource_limits.py"
+
+    resource_test.write_text(
+        """
+from pathlib import Path
+
+
+def test_container_limits():
+    cgroup = Path("/sys/fs/cgroup")
+
+    # Docker Desktop uses cgroup v2.
+    memory = int((cgroup / "memory.max").read_text().strip())
+    pids = int((cgroup / "pids.max").read_text().strip())
+
+    cpu_quota, cpu_period = (
+        (cgroup / "cpu.max").read_text().strip().split()
+    )
+
+    assert memory <= 512 * 1024 * 1024
+    assert pids <= 64
+    assert cpu_quota != "max"
+    assert int(cpu_quota) <= int(cpu_period)
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="pytest",
+        timeout_seconds=60,
+    )
+
+    assert result.status == "passed", (
+        f"STDOUT: {result.stdout}\n"
+        f"STDERR: {result.stderr}"
+    )
+    assert result.exit_code == 0
+    assert "2 passed" in result.stdout
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Requires real Docker execution",
+)
+def test_real_docker_memory_exhaustion(workspace):
+    """Memory exhaustion must not escape sandbox limits."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI unavailable")
+
+    (workspace / "test_memory_limit.py").write_text(
+        """
+def test_memory_exhaustion():
+    blocks = []
+    while True:
+        blocks.append(bytearray(16 * 1024 * 1024))
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="pytest",
+        timeout_seconds=15,
+    )
+
+    assert result.status in {"failed", "timed_out", "execution_error"}
+    assert result.status != "passed"
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Requires real Docker execution",
+)
+def test_real_docker_output_limits(workspace):
+    """Large test output must be truncated safely."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI unavailable")
+
+    (workspace / "test_large_output.py").write_text(
+        """
+def test_large_output():
+    print("FORGEPATH_OUTPUT_" * 20000)
+    assert False, "Intentional failure to expose captured output"
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="pytest",
+        timeout_seconds=60,
+    )
+
+    assert result.status == "failed"
+    assert result.exit_code != 0
+
+    # Output must stay within the configured 64 KB limit.
+    assert len(result.stdout.encode("utf-8")) <= 65536
+    assert len(result.stderr.encode("utf-8")) <= 65536
+
+    assert result.stdout_truncated is True
+
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Requires real Docker execution",
+)
+def test_real_docker_child_process_cleanup(workspace):
+    """A timed-out test must not leave its child processes running."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI unavailable")
+
+    (workspace / "test_child_process.py").write_text(
+        """
+import subprocess
+import sys
+import time
+
+
+def test_child_process():
+    subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"]
+    )
+
+    time.sleep(120)
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="pytest",
+        timeout_seconds=5,
+    )
+
+    assert result.status == "timed_out"
+    assert result.exit_code is None
+
+    containers = subprocess.run(
+        [
+            "docker", "ps", "-a",
+            "--filter", "name=forgepath-test-",
+            "--format", "{{.Names}}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+
+    assert not containers.stdout.strip(), (
+        f"Sandbox containers remain: {containers.stdout}"
+    )
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Requires real Docker execution",
+)
+def test_real_docker_temporary_disk_limit(workspace):
+    """The sandbox must enforce its temporary filesystem size limit."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI unavailable")
+
+    (workspace / "test_disk_limit.py").write_text(
+        """
+import errno
+from pathlib import Path
+
+
+def test_temporary_storage_limit():
+    target = Path("/work/forgepath_disk_limit.bin")
+
+    try:
+        with target.open("wb") as output:
+            block = b"x" * (8 * 1024 * 1024)
+
+            for _ in range(32):
+                output.write(block)
+
+    except OSError as exc:
+        assert exc.errno == errno.ENOSPC, str(exc)
+
+    else:
+        raise AssertionError(
+            "Sandbox temporary storage limit was not enforced"
+        )
+
+    finally:
+        target.unlink(missing_ok=True)
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="pytest",
+        timeout_seconds=60,
+    )
+
+    assert result.status == "passed", (
+        f"STDOUT: {result.stdout}\n"
+        f"STDERR: {result.stderr}"
+    )
+
+    assert result.exit_code == 0
+    assert "2 passed" in result.stdout
