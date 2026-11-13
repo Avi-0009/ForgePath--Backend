@@ -1,28 +1,22 @@
-
-"""M10: Real PostgreSQL and Alembic integration tests.
-
-Requires a dedicated disposable PostgreSQL database.
-Never run against production or development application data.
-"""
+from __future__ import annotations
 
 import os
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import inspect, text
-from sqlalchemy.ext.asyncio import create_async_engine
-from uuid import uuid4
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db.base import Base
-import app.models  # noqa: F401 - registers SQLAlchemy models
+import app.models
 
 
-TEST_DATABASE_URL = os.getenv(
-    "FORGEPATH_M10_TEST_DATABASE_URL"
-)
+TEST_DATABASE_URL = os.getenv("FORGEPATH_M10_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL,
@@ -37,15 +31,19 @@ def anyio_backend():
 
 @pytest.fixture(scope="module")
 def migrated_database():
-    """Apply Alembic migrations to the dedicated test database."""
+    """Run Alembic migrations against the dedicated M10 database."""
 
     if not TEST_DATABASE_URL:
         pytest.skip("Test database not configured")
 
-    # Prevent accidental execution against other databases.
+    url = make_url(TEST_DATABASE_URL)
+
     assert (
-        "forgepath_m10" in TEST_DATABASE_URL
-        and "5544" in TEST_DATABASE_URL
+        url.drivername == "postgresql+asyncpg"
+        and url.host in {"127.0.0.1", "localhost"}
+        and url.port == 5544
+        and url.database == "forgepath_m10"
+        and url.username == "forgepath_test"
     ), "Refusing to migrate a non-M10 database"
 
     root = Path(__file__).resolve().parents[1]
@@ -64,28 +62,87 @@ def migrated_database():
     )
 
     assert result.returncode == 0, (
-        f"Alembic migration failed:\n"
+        "Alembic migration failed:\n"
         f"{result.stdout}\n{result.stderr}"
     )
 
     return TEST_DATABASE_URL
 
 
+def _user_values(*, prefix: str = "test") -> dict:
+    """Generate valid user data respecting the 20-character username limit."""
+
+    suffix = uuid4().hex[:10]
+    username = f"{prefix}_{suffix}"
+
+    assert len(username) <= 20
+
+    return {
+        "id": uuid4(),
+        "name": "Integration Test",
+        "username": username,
+        "email": f"{username}@example.com",
+        "password": "test-hash",
+    }
+
+
+async def _insert_user(connection, values: dict) -> None:
+    """Insert a temporary integration-test user."""
+
+    await connection.execute(
+        text("""
+            INSERT INTO users
+                (id, full_name, username, email, password_hash)
+            VALUES
+                (:id, :name, :username, :email, :password)
+        """),
+        values,
+    )
+
+
+async def _insert_session(
+    connection,
+    *,
+    user_id,
+    token_hash: str,
+    session_id=None,
+) -> None:
+    """Insert a temporary authentication session."""
+
+    await connection.execute(
+        text("""
+            INSERT INTO auth_sessions
+                (id, user_id, refresh_token_hash, expires_at)
+            VALUES
+                (:id, :user_id, :token_hash, NOW() + INTERVAL '1 day')
+        """),
+        {
+            "id": session_id or uuid4(),
+            "user_id": user_id,
+            "token_hash": token_hash,
+        },
+    )
+
+
+# PostgreSQL connectivity
+
 @pytest.mark.anyio
 async def test_postgres_connection(migrated_database):
-    """Verify the database accepts actual SQL queries."""
+    """Verify PostgreSQL accepts real queries."""
 
     engine = create_async_engine(migrated_database)
 
     try:
         async with engine.connect() as connection:
-            result = await connection.execute(
-                text("SELECT 1")
-            )
+            result = await connection.execute(text("SELECT 1"))
+
             assert result.scalar_one() == 1
+
     finally:
         await engine.dispose()
 
+
+# Application tables
 
 @pytest.mark.anyio
 async def test_all_application_tables_exist(migrated_database):
@@ -95,15 +152,16 @@ async def test_all_application_tables_exist(migrated_database):
 
     try:
         async with engine.connect() as connection:
-            existing_tables = await connection.run_sync(
-                lambda sync_connection: set(
-                    inspect(sync_connection).get_table_names()
-                )
-            )
+
+            def inspect_tables(sync_connection):
+                inspector = inspect(sync_connection)
+                return set(inspector.get_table_names())
+
+            existing_tables = await connection.run_sync(inspect_tables)
 
         expected_tables = set(Base.metadata.tables.keys())
 
-        assert expected_tables, "No application models registered"
+        assert expected_tables, "No SQLAlchemy models registered"
 
         missing = expected_tables - existing_tables
 
@@ -115,9 +173,11 @@ async def test_all_application_tables_exist(migrated_database):
         await engine.dispose()
 
 
+# Alembic revision
+
 @pytest.mark.anyio
 async def test_alembic_version_exists(migrated_database):
-    """Verify Alembic recorded the applied migration revision."""
+    """Verify Alembic recorded the applied migration."""
 
     engine = create_async_engine(migrated_database)
 
@@ -135,10 +195,11 @@ async def test_alembic_version_exists(migrated_database):
         await engine.dispose()
 
 
+# Foreign-key relationships
 
 @pytest.mark.anyio
 async def test_postgres_foreign_keys(migrated_database):
-    """Verify actual PostgreSQL foreign keys match SQLAlchemy models."""
+    """Verify PostgreSQL foreign keys match registered SQLAlchemy models."""
 
     engine = create_async_engine(migrated_database)
 
@@ -166,7 +227,7 @@ async def test_postgres_foreign_keys(migrated_database):
                     }
 
                     assert expected == actual, (
-                        f"Foreign key mismatch: {table.name}\n"
+                        f"Foreign-key mismatch: {table.name}\n"
                         f"Expected: {expected}\n"
                         f"Actual: {actual}"
                     )
@@ -177,9 +238,11 @@ async def test_postgres_foreign_keys(migrated_database):
         await engine.dispose()
 
 
+# Username/email uniqueness
+
 @pytest.mark.anyio
 async def test_postgres_user_unique_constraints(migrated_database):
-    """Usernames and emails must be unique in PostgreSQL."""
+    """Username and email must have database-level uniqueness."""
 
     engine = create_async_engine(migrated_database)
 
@@ -216,130 +279,300 @@ async def test_postgres_user_unique_constraints(migrated_database):
         await engine.dispose()
 
 
+# Duplicate username rejection
+
 @pytest.mark.anyio
 async def test_postgres_rejects_duplicate_username(migrated_database):
-    """PostgreSQL must enforce username uniqueness."""
+    """PostgreSQL must reject duplicate usernames."""
 
     engine = create_async_engine(migrated_database)
-    unique = uuid4().hex[:12]
+
+    first = _user_values(prefix="dup")
+    second = _user_values(prefix="dup")
+
+    second["username"] = first["username"]
 
     try:
         async with engine.connect() as connection:
-            async with connection.begin():
-                await connection.execute(
-                    text("""
-                        INSERT INTO users
-                        (full_name, username, email, password_hash)
-                        VALUES
-                        (:name, :username, :email, :password)
-                    """),
-                    {
-                        "name": "Integration Test",
-                        "username": f"test_{unique}",
-                        "email": f"first_{unique}@example.com",
-                        "password": "test-hash",
-                    },
-                )
+            transaction = await connection.begin()
 
-                # Attempt to insert a duplicate username.
-                # PostgreSQL should reject it.
+            try:
+                await _insert_user(connection, first)
+
                 with pytest.raises(IntegrityError):
                     async with connection.begin_nested():
-                        await connection.execute(
-                            text("""
-                                INSERT INTO users
-                                (full_name, username, email, password_hash)
-                                VALUES
-                                (:name, :username, :email, :password)
-                            """),
-                            {
-                                "name": "Duplicate Test",
-                                "username": f"test_{unique}",
-                                "email": f"second_{unique}@example.com",
-                                "password": "test-hash",
-                            },
-                        )
+                        await _insert_user(connection, second)
+
+            finally:
+                await transaction.rollback()
 
     finally:
         await engine.dispose()
 
 
+# Invalid foreign-key rejection
+
 @pytest.mark.anyio
 async def test_postgres_rejects_invalid_session_user(migrated_database):
-    """Auth sessions must reference an existing user."""
+    """An auth session must reference an existing user."""
 
     engine = create_async_engine(migrated_database)
 
     try:
-        async with engine.begin() as connection:
-            with pytest.raises(IntegrityError):
-                await connection.execute(
-                    text("""
-                        INSERT INTO auth_sessions
-                        (user_id, refresh_token_hash, expires_at)
-                        VALUES
-                        (:user_id, :token_hash, NOW() + INTERVAL '1 day')
-                    """),
-                    {
-                        "user_id": uuid4(),
-                        "token_hash": uuid4().hex,
-                    },
-                )
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+
+            try:
+                with pytest.raises(IntegrityError):
+                    async with connection.begin_nested():
+                        await _insert_session(
+                            connection,
+                            user_id=uuid4(),
+                            token_hash=uuid4().hex,
+                        )
+
+            finally:
+                await transaction.rollback()
+
     finally:
         await engine.dispose()
 
+
+# User deletion cascades to sessions
 
 @pytest.mark.anyio
 async def test_postgres_user_session_cascade(migrated_database):
     """Deleting a user must delete their refresh sessions."""
 
     engine = create_async_engine(migrated_database)
-    user_id = uuid4()
+
+    user = _user_values(prefix="cascade")
     session_id = uuid4()
-    suffix = uuid4().hex[:12]
 
     try:
-        async with engine.begin() as connection:
-            await connection.execute(
-                text("""
-                    INSERT INTO users
-                    (id, full_name, username, email, password_hash)
-                    VALUES (:id, :name, :username, :email, :password)
-                """),
-                {
-                    "id": user_id,
-                    "name": "Cascade Test",
-                    "username": f"test_{suffix}",
-                    "email": f"cascade_{suffix}@example.com",
-                    "password": "test-hash",
-                },
-            )
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
 
-            await connection.execute(
-                text("""
-                    INSERT INTO auth_sessions
-                    (id, user_id, refresh_token_hash, expires_at)
-                    VALUES
-                    (:id, :user_id, :token_hash, NOW() + INTERVAL '1 day')
-                """),
-                {
-                    "id": session_id,
-                    "user_id": user_id,
-                    "token_hash": uuid4().hex,
-                },
-            )
+            try:
+                await _insert_user(connection, user)
 
-            await connection.execute(
-                text("DELETE FROM users WHERE id = :id"),
-                {"id": user_id},
-            )
+                await _insert_session(
+                    connection,
+                    user_id=user["id"],
+                    token_hash=uuid4().hex,
+                    session_id=session_id,
+                )
 
+                await connection.execute(
+                    text("DELETE FROM users WHERE id = :id"),
+                    {"id": user["id"]},
+                )
+
+                result = await connection.execute(
+                    text("""
+                        SELECT COUNT(*)
+                        FROM auth_sessions
+                        WHERE id = :id
+                    """),
+                    {"id": session_id},
+                )
+
+                assert result.scalar_one() == 0
+
+            finally:
+                await transaction.rollback()
+
+    finally:
+        await engine.dispose()
+
+
+# Duplicate email rejection
+
+@pytest.mark.anyio
+async def test_postgres_rejects_duplicate_email(migrated_database):
+    """PostgreSQL must reject duplicate email addresses."""
+
+    engine = create_async_engine(migrated_database)
+
+    first = _user_values(prefix="email")
+    second = _user_values(prefix="email")
+
+    second["email"] = first["email"]
+
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+
+            try:
+                await _insert_user(connection, first)
+
+                with pytest.raises(IntegrityError):
+                    async with connection.begin_nested():
+                        await _insert_user(connection, second)
+
+            finally:
+                await transaction.rollback()
+
+    finally:
+        await engine.dispose()
+
+
+# Duplicate refresh-token rejection
+
+@pytest.mark.anyio
+async def test_postgres_rejects_duplicate_refresh_token(migrated_database):
+    """Two auth sessions must not share a refresh-token hash."""
+
+    engine = create_async_engine(migrated_database)
+
+    user = _user_values(prefix="session")
+    token_hash = uuid4().hex
+
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+
+            try:
+                await _insert_user(connection, user)
+
+                await _insert_session(
+                    connection,
+                    user_id=user["id"],
+                    token_hash=token_hash,
+                )
+
+                with pytest.raises(IntegrityError):
+                    async with connection.begin_nested():
+                        await _insert_session(
+                            connection,
+                            user_id=user["id"],
+                            token_hash=token_hash,
+                        )
+
+            finally:
+                await transaction.rollback()
+
+    finally:
+        await engine.dispose()
+
+
+# ON DELETE SET NULL
+
+@pytest.mark.anyio
+async def test_postgres_ai_usage_user_set_null(migrated_database):
+    """Deleting a user must preserve AI usage with user_id set to NULL."""
+
+    engine = create_async_engine(migrated_database)
+
+    user = _user_values(prefix="usage")
+    usage_id = uuid4()
+
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+
+            try:
+                await _insert_user(connection, user)
+
+                await connection.execute(
+                    text("""
+                        INSERT INTO ai_usage_events
+                            (
+                                id, user_id, provider, model_id,
+                                api_model, operation, status
+                            )
+                        VALUES
+                            (
+                                :id, :user_id, :provider, :model_id,
+                                :api_model, :operation, :status
+                            )
+                    """),
+                    {
+                        "id": usage_id,
+                        "user_id": user["id"],
+                        "provider": "openai",
+                        "model_id": "integration-test",
+                        "api_model": "integration-test",
+                        "operation": "code_review",
+                        "status": "succeeded",
+                    },
+                )
+
+                await connection.execute(
+                    text("DELETE FROM users WHERE id = :id"),
+                    {"id": user["id"]},
+                )
+
+                result = await connection.execute(
+                    text("""
+                        SELECT user_id
+                        FROM ai_usage_events
+                        WHERE id = :id
+                    """),
+                    {"id": usage_id},
+                )
+
+                row = result.one_or_none()
+
+                assert row is not None, (
+                    "AI usage event was incorrectly deleted"
+                )
+
+                assert row.user_id is None, (
+                    "User reference was not set to NULL"
+                )
+
+            finally:
+                await transaction.rollback()
+
+    finally:
+        await engine.dispose()
+
+
+# Transaction rollback integrity
+
+@pytest.mark.anyio
+async def test_postgres_transaction_rollback(migrated_database):
+    """Rolled-back database writes must not persist."""
+
+    engine = create_async_engine(migrated_database)
+
+    user = _user_values(prefix="rb")
+
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+
+            try:
+                await _insert_user(connection, user)
+
+                result = await connection.execute(
+                    text("""
+                        SELECT COUNT(*)
+                        FROM users
+                        WHERE id = :id
+                    """),
+                    {"id": user["id"]},
+                )
+
+                assert result.scalar_one() == 1
+
+            finally:
+                await transaction.rollback()
+
+        async with engine.connect() as connection:
             result = await connection.execute(
-                text("SELECT COUNT(*) FROM auth_sessions WHERE id = :id"),
-                {"id": session_id},
+                text("""
+                    SELECT COUNT(*)
+                    FROM users
+                    WHERE id = :id
+                """),
+                {"id": user["id"]},
             )
 
-            assert result.scalar_one() == 0
+            assert result.scalar_one() == 0, (
+                "Rolled-back user record still exists"
+            )
 
     finally:
         await engine.dispose()
