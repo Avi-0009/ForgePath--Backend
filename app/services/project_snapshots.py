@@ -216,7 +216,10 @@ def read_snapshot_sources(
     results: list[tuple[str, str]] = []
     digest = hashlib.sha256()
     total = 0
-    for path in sorted(root.rglob("*")):
+    for path in sorted(
+        root.rglob("*"),
+        key=lambda item: item.relative_to(root).as_posix(),
+    ):
         if path == manifest_path:
             continue
         if path.is_symlink():

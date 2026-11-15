@@ -8,6 +8,7 @@ from app.services.project_snapshots import (
     SnapshotValidationError,
     SourceSnapshot,
     read_snapshot_manifest,
+    read_snapshot_sources,
     store_snapshot,
 )
 
@@ -47,3 +48,34 @@ def test_isolates_snapshots_by_user_and_project(tmp_path, monkeypatch):
     assert read_snapshot_manifest(user_b, project_a) is None
     assert read_snapshot_manifest(user_a, project_b) is None
     assert not (tmp_path / "snapshots" / str(user_b) / str(project_a)).exists()
+
+
+def test_snapshot_checksum_uses_identical_order_for_nested_and_mixed_case_paths(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        settings,
+        "project_snapshot_directory",
+        str(tmp_path / "snapshots"),
+    )
+
+    user_id, project_id = uuid4(), uuid4()
+
+    files = (
+        ("a.py", "print('root')"),
+        ("a/main.py", "print('nested')"),
+        ("src/Zebra.py", "print('upper')"),
+        ("src/alpha.py", "print('lower')"),
+    )
+
+    saved = store_snapshot(
+        user_id,
+        project_id,
+        _snapshot(*reversed(files)),
+    )
+
+    assert read_snapshot_sources(
+        user_id,
+        project_id,
+        saved.snapshot_id,
+    ) == sorted(files)
