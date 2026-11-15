@@ -17,6 +17,7 @@ from app.models import (
     PasswordResetOTP,
     User,
     UserAIConfiguration,
+    ProjectReview,
 )
 
 

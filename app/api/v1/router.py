@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter
 
 from app.api.v1.routes.auth import router as auth_router
@@ -12,6 +11,8 @@ from app.api.v1.routes.agent_orchestration import router as agent_orchestration_
 from app.api.v1.routes.ai_usage import router as ai_usage_router
 from app.api.v1.routes.projects import router as projects_router
 from app.api.v1.routes.ai_configuration import router as ai_configuration_router
+from app.api.v1.routes.project_snapshots import router as project_snapshots_router
+from app.api.v1.routes.project_reviews import router as project_reviews_router
 
 
 router = APIRouter(prefix="/api/v1")
@@ -27,3 +28,5 @@ router.include_router(agent_orchestration_router)
 router.include_router(ai_usage_router)
 router.include_router(projects_router)
 router.include_router(ai_configuration_router)
+router.include_router(project_snapshots_router)
+router.include_router(project_reviews_router)

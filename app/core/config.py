@@ -20,9 +20,6 @@ class Settings(BaseSettings):
     # Encryption key for securely storing user-provided AI credentials.
     ai_credentials_encryption_key: SecretStr | None = None
 
-    # Encryption key for securely storing user-provided AI credentials.
-    ai_credentials_encryption_key: SecretStr | None = None
-
     embedding_model: str = "text-embedding-3-small"
 
     embedding_dimensions: int = Field(
@@ -83,6 +80,7 @@ class Settings(BaseSettings):
     )
 
     workspace_allowed_roots: str = ""
+    project_snapshot_directory: str | None = None
 
     @property
     def workspace_root_list(self) -> list[str]:

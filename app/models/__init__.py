@@ -7,6 +7,7 @@ from app.models.ai_usage_event import AIUsageEvent
 from app.models.agent_test_run import AgentTestRun
 from app.models.project import Project
 from app.models.user_ai_configuration import UserAIConfiguration
+from app.models.project_review import ProjectReview
 
 __all__ = [
     "User",
@@ -18,4 +19,5 @@ __all__ = [
     "AgentTestRun",
     "Project",
     "UserAIConfiguration",
+    "ProjectReview",
 ]
