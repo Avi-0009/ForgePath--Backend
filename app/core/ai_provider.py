@@ -12,19 +12,18 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias
 
 import httpx
 from dotenv import load_dotenv
+from app.core.user_ai_context import get_user_ai_choice
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Provider/model registry
-# ---------------------------------------------------------------------------
 
 AIProviderName: TypeAlias = Literal["nvidia", "openai", "huggingface"]
 ReasoningEffort: TypeAlias = Literal["none", "low", "medium", "high", "xhigh", "max"]
@@ -102,9 +101,7 @@ if AI_PROVIDER not in _DEFAULT_MODEL_BY_PROVIDER:
 DEFAULT_MODEL_ID = _DEFAULT_MODEL_BY_PROVIDER[AI_PROVIDER]
 
 
-# ---------------------------------------------------------------------------
 # Provider configuration
-# ---------------------------------------------------------------------------
 
 REQUEST_TIMEOUT_SECONDS = 240.0
 CONNECT_TIMEOUT_SECONDS = 20.0
@@ -114,9 +111,7 @@ NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 HUGGINGFACE_CHAT_URL = "https://router.huggingface.co/v1/chat/completions"
 
 
-# ---------------------------------------------------------------------------
 # Result types and errors
-# ---------------------------------------------------------------------------
 
 
 class AIProviderError(RuntimeError):
@@ -172,8 +167,36 @@ def get_model_profile(model_id: str) -> AIModelProfile:
         ) from None
 
 
-def _resolve_profile(model_id: str | None) -> AIModelProfile:
+def _resolve_profile(
+    model_id: str | None,
+) -> AIModelProfile:
+
+    choice = get_user_ai_choice()
+
+    if choice is not None and model_id is None:
+
+        if choice.provider not in _DEFAULT_MODEL_BY_PROVIDER:
+            raise AIProviderError(
+                "Unsupported personal AI provider"
+            )
+
+        original = MODEL_PROFILES[
+            _DEFAULT_MODEL_BY_PROVIDER[choice.provider]
+        ]
+
+        return replace(
+            original,
+            model_id=(
+                f"{choice.provider}.{choice.model_identifier}"
+            )[:128],
+            api_model=choice.model_identifier,
+            display_name=choice.model_identifier,
+            reasoning_efforts=(),
+            default_reasoning_effort=None,
+        )
+
     selected_model_id = model_id or DEFAULT_MODEL_ID
+
     return get_model_profile(selected_model_id)
 
 
@@ -226,9 +249,7 @@ def _resolve_reasoning_effort(
     return effort
 
 
-# ---------------------------------------------------------------------------
 # Credentials and HTTP requests
-# ---------------------------------------------------------------------------
 
 
 def _get_api_key(*env_vars: str) -> str:
@@ -309,9 +330,7 @@ async def _post_json(
         raise AIProviderError(f"{provider_name} returned invalid JSON.") from None
 
 
-# ---------------------------------------------------------------------------
 # Provider response parsing
-# ---------------------------------------------------------------------------
 
 
 def _extract_openai_text(response: dict) -> str:
@@ -462,9 +481,7 @@ def _extract_finish_reason(response: dict, provider: AIProviderName) -> str | No
     return value if isinstance(value, str) else None
 
 
-# ---------------------------------------------------------------------------
 # Provider adapters
-# ---------------------------------------------------------------------------
 
 
 async def _request_openai(
@@ -474,6 +491,7 @@ async def _request_openai(
     prompt: str,
     max_output_tokens: int,
     reasoning_effort: str | None,
+    api_key: str | None = None,
 ) -> dict:
     payload: dict = {
         "model": profile.api_model,
@@ -487,7 +505,7 @@ async def _request_openai(
 
     return await _post_json(
         url=OPENAI_RESPONSES_URL,
-        api_key=_get_api_key("OPENAI_API_KEY"),
+        api_key=api_key or _get_api_key("OPENAI_API_KEY"),
         payload=payload,
         provider_name="OpenAI",
     )
@@ -500,6 +518,7 @@ async def _request_nvidia(
     prompt: str,
     max_output_tokens: int,
     reasoning_effort: str | None,
+    api_key: str | None = None,
 ) -> dict:
     payload: dict = {
         "model": profile.api_model,
@@ -521,7 +540,7 @@ async def _request_nvidia(
 
     return await _post_json(
         url=NVIDIA_CHAT_URL,
-        api_key=_get_api_key("NVIDIA_API_KEY"),
+        api_key=api_key or _get_api_key("NVIDIA_API_KEY"),
         payload=payload,
         provider_name="NVIDIA",
     )
@@ -534,6 +553,7 @@ async def _request_huggingface(
     prompt: str,
     max_output_tokens: int,
     reasoning_effort: str | None,
+    api_key: str | None = None,
 ) -> dict:
     # Qwen3-Coder-Next is configured as a non-thinking model in this registry.
     if reasoning_effort is not None:
@@ -543,7 +563,11 @@ async def _request_huggingface(
 
     return await _post_json(
         url=HUGGINGFACE_CHAT_URL,
-        api_key=_get_api_key("HG_TOKEN", "HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"),
+        api_key=api_key or _get_api_key(
+            "HG_TOKEN",
+            "HF_TOKEN",
+            "HUGGINGFACEHUB_API_TOKEN",
+        ),
         payload={
             "model": profile.api_model,
             "messages": [
@@ -557,9 +581,7 @@ async def _request_huggingface(
     )
 
 
-# ---------------------------------------------------------------------------
 # Public generation interface
-# ---------------------------------------------------------------------------
 
 
 async def _record_completion_usage_best_effort(
@@ -624,6 +646,17 @@ async def generate_completion(
         raise ValueError("Prompt cannot be empty.")
 
     profile = _resolve_profile(model_id)
+    personal_choice = (
+        get_user_ai_choice()
+        if model_id is None
+        else None
+    )
+
+    selected_key = (
+        personal_choice.api_key
+        if personal_choice is not None
+        else None
+    )
     output_limit = _resolve_max_output_tokens(profile, max_output_tokens)
     effort = _resolve_reasoning_effort(profile, reasoning_effort)
 
@@ -638,6 +671,7 @@ async def generate_completion(
                 prompt=prompt,
                 max_output_tokens=output_limit,
                 reasoning_effort=effort,
+                api_key=selected_key,
             )
             generated_text = _extract_openai_text(response)
 
@@ -648,6 +682,7 @@ async def generate_completion(
                 prompt=prompt,
                 max_output_tokens=output_limit,
                 reasoning_effort=effort,
+                api_key=selected_key,
             )
             generated_text = _extract_chat_completion_text(response, "NVIDIA")
 
@@ -658,6 +693,7 @@ async def generate_completion(
                 prompt=prompt,
                 max_output_tokens=output_limit,
                 reasoning_effort=effort,
+                api_key=selected_key,
             )
             generated_text = _extract_chat_completion_text(response, "Hugging Face")
 

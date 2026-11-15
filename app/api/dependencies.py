@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
 from app.core.ai_usage_context import ai_usage_context
+from app.core.user_ai_context import user_ai_choice
+from app.services.user_ai_configuration import load_user_ai_choice
 from app.db.session import get_db
 from app.models.user import User
 from app.repositories import user as user_repository
@@ -76,15 +78,38 @@ async def get_current_user(
 
 
 async def get_current_user_with_usage_context(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+    db: Annotated[
+        AsyncSession,
+        Depends(get_db),
+    ],
 ) -> AsyncGenerator[User, None]:
-    """Authenticate a user and scope subsequent telemetry to that user.
+    """
+    Authenticate the user and load their personal AI configuration.
 
-    The context is always reset after the request, preventing identity leakage
-    between concurrent or reused async tasks.
+    Both AI usage attribution and personal model selection are
+    isolated to the current request.
     """
 
-    with ai_usage_context(user_id=current_user.id):
+    try:
+        choice = await load_user_ai_choice(
+            db,
+            current_user.id,
+        )
+
+    except RuntimeError:
+        raise HTTPException(
+            status_code=503,
+            detail="Personal AI credentials are unavailable",
+        ) from None
+
+    with (
+        ai_usage_context(user_id=current_user.id),
+        user_ai_choice(choice),
+    ):
         yield current_user
 
 

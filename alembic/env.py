@@ -16,6 +16,7 @@ from app.models import (
     EmailVerificationOTP,
     PasswordResetOTP,
     User,
+    UserAIConfiguration,
 )
 
 
