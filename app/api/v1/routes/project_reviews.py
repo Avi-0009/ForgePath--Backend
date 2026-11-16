@@ -91,7 +91,7 @@ async def latest_project_review(
     project_id: UUID,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> dict:
+) -> dict | None :
     owner = await db.execute(select(Project.id).where(Project.id == project_id, Project.user_id == user.id))
     if owner.scalar_one_or_none() is None:
         raise HTTPException(404, "Project not found")
@@ -100,6 +100,8 @@ async def latest_project_review(
         .order_by(ProjectReview.created_at.desc()).limit(1)
     )
     review = result.scalar_one_or_none()
+
     if review is None:
-        raise HTTPException(404, "No review for this project")
+        return None
+
     return _result(review)
