@@ -34,6 +34,7 @@ def _result(review: ProjectReview) -> dict:
         "max_ai_calls": MAX_AI_CALLS,
         "max_output_tokens_per_call": MAX_OUTPUT_TOKENS_PER_CALL,
         "result_text": review.result_text,
+        "findings": review.findings or [],
         "error_message": review.error_message,
     }
 

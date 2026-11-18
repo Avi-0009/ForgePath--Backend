@@ -8,6 +8,7 @@ from app.models.agent_test_run import AgentTestRun
 from app.models.project import Project
 from app.models.user_ai_configuration import UserAIConfiguration
 from app.models.project_review import ProjectReview
+from app.models.project_review_task import ProjectReviewTask
 
 __all__ = [
     "User",
@@ -20,4 +21,5 @@ __all__ = [
     "Project",
     "UserAIConfiguration",
     "ProjectReview",
+    "ProjectReviewTask",
 ]
