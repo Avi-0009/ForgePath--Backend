@@ -43,9 +43,13 @@ _SKIP_SUFFIXES = SENSITIVE_SUFFIXES | {
     ".p12", ".pfx", ".jks", ".keystore", ".sqlite", ".db",
 }
 _SUSPICIOUS = re.compile(
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
-    r"(?i:aws_secret_access_key\s*[:=]|authorization\s*[:=]\s*bearer\s+\S+|"
-    r"(?:api[_-]?key|password|access[_-]?token)\s*[:=]\s*['\"]?[A-Za-z0-9_+\-/]{18,})"
+    r"(?:^|\r?\n)[ \t]*-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"authorization\s*[:=]\s*bearer\s+[A-Za-z0-9_+./=-]{18,}|"
+    r"(?:aws_secret_access_key|api[_-]?key|password|access[_-]?token)\s*[:=]\s*"
+    r"(['\"])[A-Za-z0-9_+\-/=]{18,}\1|"
+    r"(?:aws_secret_access_key|api[_-]?key|password|access[_-]?token)\s*[:=]\s*"
+    r"(?:sk-[A-Za-z0-9_-]{18,}|ghp_[A-Za-z0-9]{18,}|AKIA[A-Z0-9]{16})(?![A-Za-z0-9_])",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -112,7 +116,9 @@ def _prepare(snapshot: SourceSnapshot) -> tuple[list[tuple[PurePosixPath, bytes]
             raise SnapshotValidationError("Duplicate source filename")
         seen.add(canonical)
         if "\x00" in item.content or _SUSPICIOUS.search(item.content):
-            raise SnapshotValidationError("A file contains binary data or suspected credentials")
+            raise SnapshotValidationError(
+                f"Source file {path.as_posix()} contains binary data or suspected credentials"
+            )
         data = item.content.encode("utf-8")
         if len(data) > MAX_FILE_BYTES:
             raise SnapshotValidationError("A source file exceeds the per-file size limit")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
@@ -26,6 +27,9 @@ from app.services.project_snapshots import (
 
 router = APIRouter(prefix="/projects", tags=["Project Sources"])
 MAX_REQUEST_BYTES = MAX_SNAPSHOT_BYTES + 1_000_000
+
+logger = logging.getLogger(__name__)
+
 
 
 async def _owned_project(db: AsyncSession, user_id: UUID, project_id: UUID, *, lock: bool = False) -> Project:
@@ -60,8 +64,16 @@ async def upload_project_snapshot(
     try:
         payload = SourceSnapshot.model_validate_json(body)
         manifest = await asyncio.to_thread(store_snapshot, user.id, project_id, payload)
-    except (ValidationError, SnapshotValidationError, UnicodeError):
-        raise HTTPException(422, "Source snapshot contains invalid or prohibited files") from None
+    except (ValidationError, SnapshotValidationError, UnicodeError) as exc:
+        logger.warning(
+            "Project snapshot rejected: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        raise HTTPException(
+            422,
+            "Source snapshot contains invalid or prohibited files",
+        ) from None
     except SnapshotConfigurationError:
         raise HTTPException(503, "Private project snapshot storage is not configured") from None
     except OSError:
