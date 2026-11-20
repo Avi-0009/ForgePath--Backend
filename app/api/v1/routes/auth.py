@@ -54,9 +54,17 @@ async def signup(
     try:
         return await register_user(db, payload)
     except AccountAlreadyExistsError as exc:
+        detail = {
+            "email": "This email address is already in use.",
+            "username": "This username is already taken.",
+        }.get(
+            exc.field,
+            "An account with these details already exists.",
+        )
+
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email or username already exists",
+            detail=detail,
         ) from exc
 
 

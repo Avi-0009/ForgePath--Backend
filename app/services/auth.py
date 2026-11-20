@@ -10,6 +10,10 @@ from app.schemas.auth import LoginRequest, SignupRequest
 class AccountAlreadyExistsError(Exception):
     """An email or username is already registered."""
 
+    def __init__(self, field: str = "account") -> None:
+        self.field = field
+        super().__init__(f"Duplicate {field}")
+
 
 class InvalidCredentialsError(Exception):
     """The supplied login credentials are invalid."""
@@ -25,7 +29,7 @@ async def register_user(
     )
 
     if existing_email is not None:
-        raise AccountAlreadyExistsError()
+        raise AccountAlreadyExistsError("email")
 
     existing_username = await user_repository.get_by_username(
         db,
@@ -33,7 +37,7 @@ async def register_user(
     )
 
     if existing_username is not None:
-        raise AccountAlreadyExistsError()
+        raise AccountAlreadyExistsError("username")
 
     user = User(
         full_name=payload.full_name,
@@ -49,7 +53,20 @@ async def register_user(
         await db.refresh(user)
     except IntegrityError as exc:
         await db.rollback()
-        raise AccountAlreadyExistsError() from exc
+
+        constraint_name = getattr(
+            getattr(exc.orig, "diag", None),
+            "constraint_name",
+            None,
+        )
+
+        if constraint_name == "uq_users_email":
+            raise AccountAlreadyExistsError("email") from exc
+
+        if constraint_name == "uq_users_username":
+            raise AccountAlreadyExistsError("username") from exc
+
+        raise
 
     return user
 
