@@ -27,8 +27,8 @@ from app.services.user_ai_configuration import load_user_ai_choice
 
 
 MAX_AI_CALLS = 4
-MAX_BATCH_CHARS = 12_000
-MAX_OUTPUT_TOKENS_PER_CALL = 900
+MAX_BATCH_CHARS = 9_000
+MAX_OUTPUT_TOKENS_PER_CALL = 1_600
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +170,9 @@ async def run_initial_review(
         summary = (
             f"Project snapshot contains {len(sources)} files. "
             f"Languages/extensions: {dict(language_counts)}.\n"
-            f"AI-reviewed files: {covered}/{len(sources)}. "
-            "Files not included in AI batches have only been inventoried.\n"
+            f"Files selected for AI batches: {covered}/{len(sources)}. "
+            "Only files in batches with valid structured results count as reviewed. "
+            "Other files have only been inventoried.\n"
         )
 
         await _update_review(
@@ -183,6 +184,7 @@ async def run_initial_review(
         sections: list[str] = []
         findings: list[dict[str, str]] = []
         invalid_batches = 0
+        validated_files: set[str] = set()
 
         with (
             user_ai_choice(choice),
@@ -208,7 +210,7 @@ async def run_initial_review(
                         "low or info. Evidence MUST quote exact "
                         "source text from a file excerpt; path "
                         "MUST be an included FILE path. Return "
-                        "at most 3 concrete findings. If evidence "
+                        "at most 2 concrete findings. If evidence "
                         "is weak, return no finding. Never claim "
                         "unprovided files were inspected. "
                         "No markdown fences, no commentary before or "
@@ -229,6 +231,13 @@ async def run_initial_review(
                 )
                 if not parsed.format_valid:
                     invalid_batches += 1
+                    logger.warning(
+                        "Initial review batch %d/%d returned invalid structured output "
+                        "(finish_reason=%s, characters=%d).",
+                        index, len(batches), answer.finish_reason, len(answer.text),
+                    )
+                else:
+                    validated_files.update(excerpts)
 
                 for suggestion in parsed.findings:
                     duplicate = any(
@@ -246,11 +255,7 @@ async def run_initial_review(
 
                 await _update_review(
                     review_id,
-                    files_reviewed=(
-                        covered
-                        if index == len(batches)
-                        else 0
-                    ),
+                    files_reviewed=len(validated_files),
                     ai_calls=index,
                     findings=findings,
                     result_text=(

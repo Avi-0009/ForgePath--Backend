@@ -13,7 +13,7 @@ def make_payload():
     return SignupRequest(
         email="example@email.com",
         username="example_user",
-        password="CorrectHorseBatteryStaple",
+        password="TestPass123!",
         full_name="Example User",
     )
 
