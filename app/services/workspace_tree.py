@@ -157,8 +157,6 @@ def get_workspace_tree() -> WorkspaceNode:
     Paths are returned as metadata for workspace navigation. Files are
     never opened or modified by this service.
     """
-    roots = _resolve_configured_roots()
-    budget = _TreeBudget()
 
     virtual_root = WorkspaceNode(
         name="workspaces",
@@ -168,6 +166,12 @@ def get_workspace_tree() -> WorkspaceNode:
         workspace_root=None,
         relative_path="",
     )
+
+    if not settings.workspace_root_list:
+        return virtual_root
+
+    roots = _resolve_configured_roots()
+    budget = _TreeBudget()
 
     for root in roots:
         if budget.nodes >= MAX_TREE_NODES:
