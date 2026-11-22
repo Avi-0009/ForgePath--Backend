@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Awaitable, Callable
 from uuid import UUID, uuid4
 
 from app.services.workspace_ingestion import IngestedWorkspaceDocument
@@ -145,6 +146,7 @@ async def index_project_snapshot(
     service: WorkspaceIndexingService,
     user_id: UUID, project_id: UUID, snapshot_id: UUID,
     manifest_sha256: str, sources: list[tuple[str, str]],
+    progress: Callable[[int, int, int], Awaitable[None]] | None = None,
 ) -> dict:
     """Explicitly embed verified snapshot sources, then atomically mark ready."""
     namespace = snapshot_vector_namespace(service, user_id, project_id, snapshot_id)
@@ -165,7 +167,18 @@ async def index_project_snapshot(
     if not documents:
         raise ValueError("No nonempty source files available for indexing")
 
-    result = await service.index_documents(documents)
+    processed = embedded = upserted = unchanged = 0
+    # Small batches provide observable progress and make retries reuse
+    # embeddings already persisted before an interruption.
+    for start in range(0, len(documents), 8):
+        batch = documents[start:start + 8]
+        result = await service.index_documents(batch)
+        processed += len(batch)
+        embedded += result.chunks_processed
+        upserted += result.vectors_upserted
+        unchanged += result.unchanged_files_skipped
+        if progress is not None:
+            await progress(processed, len(documents), embedded)
     receipt = _receipt_path(service, user_id, project_id, snapshot_id)
     receipt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if receipt.is_symlink():
@@ -185,7 +198,7 @@ async def index_project_snapshot(
 
     return {
         "files_indexed": len(documents),
-        "chunks_embedded": result.chunks_processed,
-        "vectors_upserted": result.vectors_upserted,
-        "unchanged_files_skipped": result.unchanged_files_skipped,
+        "chunks_embedded": embedded,
+        "vectors_upserted": upserted,
+        "unchanged_files_skipped": unchanged,
     }

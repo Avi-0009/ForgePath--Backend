@@ -71,6 +71,73 @@ def _service(request: Request):
     return getattr(request.app.state, "workspace_indexing_service", None)
 
 
+def _jobs(request: Request):
+    manager = getattr(request.app.state, "project_index_jobs", None)
+    if manager is None:
+        raise HTTPException(503, "Background indexing is not configured")
+    return manager
+
+
+@router.post("/{project_id}/semantic-index/jobs", status_code=202)
+async def start_project_index_job(
+    project_id: UUID, payload: ConfirmIndexRequest, request: Request,
+    user: Annotated[User, Depends(get_current_user_with_usage_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    manifest, sources = await _owned_snapshot(project_id, user, db, read_sources=True)
+    if not payload.confirm_indexing:
+        raise HTTPException(400, "Explicit indexing confirmation is required")
+    if payload.expected_snapshot_id != manifest.snapshot_id:
+        raise HTTPException(409, "Snapshot changed. Preview indexing again")
+    service = _service(request)
+    if service is None:
+        raise HTTPException(503, "Semantic embedding provider is not configured")
+    estimate = await asyncio.to_thread(
+        estimate_snapshot_chunks, service, user.id, project_id, manifest.snapshot_id, sources,
+    )
+    if estimate == 0:
+        raise HTTPException(422, "No nonempty source chunks are available for indexing")
+    if estimate > MAX_INDEX_CHUNKS:
+        raise HTTPException(413, "Snapshot exceeds the 1,200-chunk embedding budget")
+    try:
+        return _jobs(request).start(
+            user.id, project_id, manifest.snapshot_id, manifest.sha256, sources, estimate,
+        )
+    except ValueError:
+        raise HTTPException(409, "An indexing job is already running for this project") from None
+    except OSError:
+        raise HTTPException(503, "Could not create indexing job") from None
+
+
+@router.get("/{project_id}/semantic-index/jobs/latest")
+async def get_latest_project_index_job(
+    project_id: UUID, request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict | None:
+    manifest, _ = await _owned_snapshot(project_id, user, db)
+    try:
+        return _jobs(request).latest(user.id, project_id, manifest.snapshot_id)
+    except (OSError, ValueError):
+        raise HTTPException(503, "Indexing job state is unavailable") from None
+
+
+@router.get("/{project_id}/semantic-index/jobs/{job_id}")
+async def get_project_index_job(
+    project_id: UUID, job_id: UUID, request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    await _owned_snapshot(project_id, user, db)
+    try:
+        result = _jobs(request).get(user.id, project_id, job_id)
+    except (OSError, ValueError, KeyError):
+        raise HTTPException(503, "Indexing job state is unavailable") from None
+    if result is None:
+        raise HTTPException(404, "Indexing job not found")
+    return result
+
+
 @router.get("/{project_id}/semantic-index")
 async def get_project_semantic_status(
     project_id: UUID, request: Request,
@@ -204,6 +271,9 @@ async def delete_project_semantic_index(
             result = await asyncio.to_thread(
                 remove_project_semantic_indexes, service, user.id, project_id,
             )
+            jobs = getattr(request.app.state, "project_index_jobs", None)
+            if jobs is not None:
+                await asyncio.to_thread(jobs.prune, user.id, project_id)
         except (OSError, ValueError, SnapshotConfigurationError, VectorStoreError):
             logger.exception("Could not revoke project semantic index")
             raise HTTPException(503, "Could not safely remove project semantic index") from None

@@ -1,4 +1,3 @@
-
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -21,6 +20,7 @@ from app.services.workspace_indexing import (
     get_embedding_model_identifier,
 )
 from app.services.agent_orchestration.runtime import AgentRuntimeManager
+from app.services.project_index_jobs import ProjectIndexJobManager
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     vector_store = None
 
     app.state.workspace_indexing_service = None
+    app.state.project_index_jobs = None
 
     # The agent runtime is initialized lazily when first requested.
     agent_runtime_manager = AgentRuntimeManager()
@@ -83,6 +84,9 @@ async def lifespan(app: FastAPI):
                     vector_store=vector_store,
                 )
             )
+            app.state.project_index_jobs = ProjectIndexJobManager(
+                app.state.workspace_indexing_service
+            )
 
             logger.info(
                 "Workspace semantic indexing initialized. "
@@ -95,6 +99,9 @@ async def lifespan(app: FastAPI):
         yield
 
     finally:
+        if app.state.project_index_jobs is not None:
+            await app.state.project_index_jobs.shutdown()
+        app.state.project_index_jobs = None
         app.state.workspace_indexing_service = None
 
         try:

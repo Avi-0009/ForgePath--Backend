@@ -81,6 +81,12 @@ async def upload_project_snapshot(
                     remove_project_semantic_indexes, service, user.id, project_id,
                     keep_snapshot_id=manifest.snapshot_id,
                 )
+                jobs = getattr(request.app.state, "project_index_jobs", None)
+                if jobs is not None:
+                    await asyncio.to_thread(
+                        jobs.prune, user.id, project_id,
+                        keep_snapshot_id=manifest.snapshot_id,
+                    )
             except (OSError, ValueError, SnapshotConfigurationError, VectorStoreError):
                 logger.exception("Obsolete semantic vectors could not be cleaned up")
                 cleanup_pending = True

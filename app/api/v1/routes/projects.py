@@ -1,4 +1,3 @@
-
 """Authenticated, user-owned project management APIs.
 
 Repository ingestion, source snapshots, and indexing are intentionally
@@ -286,6 +285,9 @@ async def delete_project(
                 raise HTTPException(503, "Configure the semantic store to safely purge project data")
             if service is not None:
                 await asyncio.to_thread(remove_project_semantic_indexes, service, current_user.id, project_id)
+            jobs = getattr(request.app.state, "project_index_jobs", None)
+            if jobs is not None:
+                await asyncio.to_thread(jobs.prune, current_user.id, project_id)
             await asyncio.to_thread(delete_project_snapshot_storage, current_user.id, project_id)
         except HTTPException:
             raise
