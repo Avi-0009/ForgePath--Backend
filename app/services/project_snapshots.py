@@ -78,6 +78,7 @@ class SnapshotManifest:
     file_count: int
     total_bytes: int
     sha256: str
+    asset_paths: tuple[str, ...] = ()
 
 
 def _safe_path(relative_path: str) -> PurePosixPath:
