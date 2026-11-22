@@ -157,6 +157,41 @@ def _project_directory(user_id: UUID, project_id: UUID) -> Path:
     return _storage_root() / str(user_id) / str(project_id)
 
 
+def list_project_snapshot_ids(user_id: UUID, project_id: UUID) -> set[UUID]:
+    """Enumerate only version directories belonging to this exact project."""
+    directory = _project_directory(user_id, project_id)
+    if not directory.exists():
+        return set()
+    if directory.is_symlink() or not directory.is_dir():
+        raise SnapshotConfigurationError("Unsafe project snapshot directory")
+    versions: set[UUID] = set()
+    for entry in directory.iterdir():
+        if entry.is_symlink() or (getattr(entry, "is_junction", None) and entry.is_junction()):
+            raise SnapshotConfigurationError("Unsafe project snapshot entry")
+        if not entry.is_dir():
+            continue
+        try:
+            version_id = UUID(entry.name)
+        except ValueError:
+            continue
+        if str(version_id) == entry.name:
+            versions.add(version_id)
+    return versions
+
+
+def delete_project_snapshot_storage(user_id: UUID, project_id: UUID) -> None:
+    """Delete only this project's private snapshot copies after link checks."""
+    directory = _project_directory(user_id, project_id)
+    if not directory.exists():
+        return
+    if directory.is_symlink() or not directory.is_dir():
+        raise SnapshotConfigurationError("Unsafe project snapshot directory")
+    for item in directory.rglob("*"):
+        if item.is_symlink() or (getattr(item, "is_junction", None) and item.is_junction()):
+            raise SnapshotConfigurationError("Unsafe project snapshot entry")
+    shutil.rmtree(directory)
+
+
 def store_snapshot(user_id: UUID, project_id: UUID, snapshot: SourceSnapshot) -> SnapshotManifest:
     """Persist one immutable version and atomically select it for the project."""
     files, manifest = _prepare(snapshot)

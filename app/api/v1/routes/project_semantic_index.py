@@ -20,7 +20,7 @@ from app.models.user import User
 from app.services.embedding_service import EmbeddingError
 from app.services.project_semantic_index import (
     estimate_snapshot_chunks, index_project_snapshot, is_snapshot_index_ready,
-    snapshot_vector_namespace,
+    snapshot_vector_namespace, index_lifecycle_lock, remove_project_semantic_indexes,
 )
 from app.services.project_snapshots import (
     SnapshotConfigurationError, SnapshotValidationError,
@@ -30,7 +30,6 @@ from app.services.vector_store import VectorStoreError
 
 router = APIRouter(prefix="/projects", tags=["Project Semantic Index"])
 logger = logging.getLogger(__name__)
-_index_lock = asyncio.Lock()
 MAX_INDEX_CHUNKS = 1200
 
 
@@ -128,9 +127,9 @@ async def create_project_semantic_index(
     service = _service(request)
     if service is None:
         raise HTTPException(503, "Semantic embedding provider is not configured")
-    if _index_lock.locked():
+    if index_lifecycle_lock.locked():
         raise HTTPException(409, "An indexing operation is already running")
-    async with _index_lock:
+    async with index_lifecycle_lock:
         estimate = await asyncio.to_thread(
             estimate_snapshot_chunks, service, user.id, project_id, manifest.snapshot_id, sources,
         )
@@ -187,3 +186,25 @@ async def search_project_semantic_index(
                          "distance": hit.distance})
     return {"project_id": str(project_id), "snapshot_id": str(manifest.snapshot_id),
             "query": payload.query, "result_count": len(verified), "results": verified}
+
+
+@router.delete("/{project_id}/semantic-index")
+async def delete_project_semantic_index(
+    project_id: UUID, request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Explicitly revoke every saved semantic index for an owned project."""
+    await _owned_snapshot(project_id, user, db)
+    service = _service(request)
+    if service is None:
+        raise HTTPException(503, "Semantic store must be configured to delete its vectors")
+    async with index_lifecycle_lock:
+        try:
+            result = await asyncio.to_thread(
+                remove_project_semantic_indexes, service, user.id, project_id,
+            )
+        except (OSError, ValueError, SnapshotConfigurationError, VectorStoreError):
+            logger.exception("Could not revoke project semantic index")
+            raise HTTPException(503, "Could not safely remove project semantic index") from None
+    return {"status": "not_indexed", **result}

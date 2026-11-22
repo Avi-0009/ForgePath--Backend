@@ -20,16 +20,17 @@ from app.services.project_snapshots import (
     SnapshotConfigurationError,
     SnapshotValidationError,
     SourceSnapshot,
+    list_project_snapshot_ids,
     read_snapshot_manifest,
     store_snapshot,
 )
+from app.services.project_semantic_index import index_lifecycle_lock, remove_project_semantic_indexes
+from app.services.vector_store import VectorStoreError
 
 
 router = APIRouter(prefix="/projects", tags=["Project Sources"])
-MAX_REQUEST_BYTES = MAX_SNAPSHOT_BYTES + 1_000_000
-
 logger = logging.getLogger(__name__)
-
+MAX_REQUEST_BYTES = MAX_SNAPSHOT_BYTES + 1_000_000
 
 
 async def _owned_project(db: AsyncSession, user_id: UUID, project_id: UUID, *, lock: bool = False) -> Project:
@@ -61,23 +62,34 @@ async def upload_project_snapshot(
         if len(body) + len(chunk) > MAX_REQUEST_BYTES:
             raise HTTPException(413, "Source upload exceeds the request limit")
         body.extend(chunk)
-    try:
-        payload = SourceSnapshot.model_validate_json(body)
-        manifest = await asyncio.to_thread(store_snapshot, user.id, project_id, payload)
-    except (ValidationError, SnapshotValidationError, UnicodeError) as exc:
-        logger.warning(
-            "Project snapshot rejected: %s: %s",
-            type(exc).__name__,
-            exc,
-        )
-        raise HTTPException(
-            422,
-            "Source snapshot contains invalid or prohibited files",
-        ) from None
-    except SnapshotConfigurationError:
-        raise HTTPException(503, "Private project snapshot storage is not configured") from None
-    except OSError:
-        raise HTTPException(503, "Could not safely store the source snapshot") from None
+    cleanup_pending = False
+    async with index_lifecycle_lock:
+        try:
+            payload = SourceSnapshot.model_validate_json(body)
+            manifest = await asyncio.to_thread(store_snapshot, user.id, project_id, payload)
+        except (ValidationError, SnapshotValidationError, UnicodeError):
+            raise HTTPException(422, "Source snapshot contains invalid or prohibited files") from None
+        except SnapshotConfigurationError:
+            raise HTTPException(503, "Private project snapshot storage is not configured") from None
+        except OSError:
+            raise HTTPException(503, "Could not safely store the source snapshot") from None
+
+        service = getattr(request.app.state, "workspace_indexing_service", None)
+        if service is not None:
+            try:
+                await asyncio.to_thread(
+                    remove_project_semantic_indexes, service, user.id, project_id,
+                    keep_snapshot_id=manifest.snapshot_id,
+                )
+            except (OSError, ValueError, SnapshotConfigurationError, VectorStoreError):
+                logger.exception("Obsolete semantic vectors could not be cleaned up")
+                cleanup_pending = True
+        else:
+            # A disabled embedding provider also means Chroma cleanup cannot
+            # be verified, so disclose that older versions may remain.
+            cleanup_pending = len(await asyncio.to_thread(
+                list_project_snapshot_ids, user.id, project_id,
+            )) > 1
 
     project.status = "ready"
     await db.commit()
@@ -88,6 +100,7 @@ async def upload_project_snapshot(
         "total_bytes": manifest.total_bytes,
         "sha256": manifest.sha256,
         "status": "ready",
+        "index_cleanup_pending": cleanup_pending,
     }
 
 

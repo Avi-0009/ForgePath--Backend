@@ -6,10 +6,12 @@ outside the scope of this module.
 """
 
 from datetime import datetime
+import asyncio
+import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -24,12 +26,19 @@ from app.api.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.project import Project
 from app.models.user import User
+from app.services.project_semantic_index import index_lifecycle_lock, remove_project_semantic_indexes
+from app.services.project_snapshots import (
+    delete_project_snapshot_storage, list_project_snapshot_ids, SnapshotConfigurationError,
+)
+from app.services.vector_store import VectorStoreError
+from app.services.vector_store import get_vector_store_path
 
 
 router = APIRouter(
     prefix="/projects",
     tags=["Projects"],
 )
+logger = logging.getLogger(__name__)
 
 
 # Request and response schemas
@@ -103,15 +112,17 @@ async def _get_owned_project(
     *,
     project_id: UUID,
     user_id: UUID,
+    lock: bool = False,
 ) -> Project:
     """Fetch a project only when owned by the authenticated user."""
 
-    result = await db.execute(
-        select(Project).where(
+    query = select(Project).where(
             Project.id == project_id,
             Project.user_id == user_id,
         )
-    )
+    if lock:
+        query = query.with_for_update()
+    result = await db.execute(query)
 
     project = result.scalar_one_or_none()
 
@@ -250,20 +261,36 @@ async def update_project(
 )
 async def delete_project(
     project_id: UUID,
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    """Delete an owned project.
-
-    Currently deletes only the project database record.
-    Source snapshots and external resources are not yet attached.
-    """
+    """Remove project vectors and private snapshots before deleting its row."""
 
     project = await _get_owned_project(
         db,
         project_id=project_id,
         user_id=current_user.id,
+        lock=True,
     )
 
-    await db.delete(project)
-    await db.commit()
+    async with index_lifecycle_lock:
+        try:
+            versions = await asyncio.to_thread(list_project_snapshot_ids, current_user.id, project_id)
+            service = getattr(request.app.state, "workspace_indexing_service", None)
+            receipt_dir = (
+                get_vector_store_path() / "project-index-receipts"
+                / str(current_user.id) / str(project_id)
+            )
+            if service is None and (versions or receipt_dir.exists()):
+                raise HTTPException(503, "Configure the semantic store to safely purge project data")
+            if service is not None:
+                await asyncio.to_thread(remove_project_semantic_indexes, service, current_user.id, project_id)
+            await asyncio.to_thread(delete_project_snapshot_storage, current_user.id, project_id)
+        except HTTPException:
+            raise
+        except (SnapshotConfigurationError, VectorStoreError, OSError, ValueError):
+            logger.exception("Project local data cleanup failed")
+            raise HTTPException(503, "Could not safely purge project data; project was retained") from None
+        await db.delete(project)
+        await db.commit()

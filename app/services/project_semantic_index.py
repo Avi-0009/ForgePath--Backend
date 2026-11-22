@@ -6,6 +6,7 @@ all provider embeddings and vector upserts have succeeded.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -15,6 +16,11 @@ from uuid import UUID, uuid4
 from app.services.workspace_ingestion import IngestedWorkspaceDocument
 from app.services.workspace_chunking import chunk_document
 from app.services.workspace_indexing import WorkspaceIndexingService
+from app.services.project_snapshots import list_project_snapshot_ids
+
+# Serializes local indexing with snapshot replacement and project deletion.
+# Multi-worker deployments need a durable distributed lock/job queue.
+index_lifecycle_lock = asyncio.Lock()
 
 
 def snapshot_vector_namespace(
@@ -36,6 +42,51 @@ def _receipt_path(
         service.vector_store.persist_directory / "project-index-receipts"
         / str(user_id) / str(project_id) / f"{snapshot_id}.json"
     )
+
+
+def remove_project_semantic_indexes(
+    service: WorkspaceIndexingService,
+    user_id: UUID, project_id: UUID,
+    *, keep_snapshot_id: UUID | None = None,
+) -> dict[str, int]:
+    """Remove only this owner's project vectors and receipts; never embed.
+
+    Snapshot directories identify versions even if an embedding operation
+    partially upserted vectors before it could write its completion receipt.
+    """
+    receipts = service.vector_store.persist_directory / "project-index-receipts" / str(user_id) / str(project_id)
+    if receipts.is_symlink() or (getattr(receipts, "is_junction", None) and receipts.is_junction()):
+        raise OSError("Unsafe project index receipt directory")
+    versions = set(list_project_snapshot_ids(user_id, project_id))
+    if receipts.exists():
+        if not receipts.is_dir():
+            raise OSError("Invalid project index receipt directory")
+        for item in receipts.iterdir():
+            if item.is_symlink() or (getattr(item, "is_junction", None) and item.is_junction()):
+                raise OSError("Unsafe project index receipt entry")
+            if item.suffix != ".json" or not item.is_file():
+                continue
+            try:
+                version = UUID(item.stem)
+            except ValueError:
+                continue
+            if str(version) == item.stem:
+                versions.add(version)
+
+    deleted_vectors = 0
+    deleted_receipts = 0
+    for version in sorted(versions, key=str):
+        if version == keep_snapshot_id:
+            continue
+        namespace = snapshot_vector_namespace(service, user_id, project_id, version)
+        deleted_vectors += service.vector_store.delete_workspace(namespace)
+        receipt = _receipt_path(service, user_id, project_id, version)
+        if receipt.is_symlink() or (getattr(receipt, "is_junction", None) and receipt.is_junction()):
+            raise OSError("Unsafe project index receipt")
+        if receipt.is_file():
+            receipt.unlink()
+            deleted_receipts += 1
+    return {"deleted_vectors": deleted_vectors, "deleted_receipts": deleted_receipts}
 
 
 def _expected_receipt(
@@ -119,6 +170,8 @@ async def index_project_snapshot(
     receipt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if receipt.is_symlink():
         raise OSError("Unsafe index receipt")
+    # Keep the atomic-write filename short: pytest's nested temp directories
+    # can otherwise exceed Windows' traditional MAX_PATH limit.
     temporary = receipt.parent / f".{uuid4().hex[:12]}.tmp"
     try:
         with temporary.open("x", encoding="utf-8") as output:
