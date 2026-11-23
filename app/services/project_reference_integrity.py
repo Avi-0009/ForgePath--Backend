@@ -40,7 +40,6 @@ _JS_COMMENTS = re.compile(r"/\*.*?\*/|(?<!:)//[^\n]*", re.DOTALL)
 
 
 def _without_comments(content: str) -> str:
-    # Preserve offsets and newlines so reported line numbers stay exact.
     return _JS_COMMENTS.sub(
         lambda match: "".join("\n" if char == "\n" else " " for char in match.group()),
         content,
@@ -178,3 +177,62 @@ def inspect_snapshot_references(
         "missing_candidates": missing,
         "limitations": "Static, relative references only; aliases, external packages, dynamic paths and custom build rules are not validated.",
     }
+
+
+def resolved_source_graph(sources: Iterable[tuple[str, str]]) -> dict[str, set[str]]:
+    """Resolve trustworthy, static source-to-source import edges.
+
+    Unlike the missing-reference report, this function also recognizes Python
+    absolute imports *when their target is actually present in this snapshot*.
+    Unknown packages and configured aliases never create invented edges.
+    Edges never point outside the supplied source list or to SVG metadata.
+    """
+    source_list = list(sources)
+    allowed = {path for path, _ in source_list}
+    graph: dict[str, set[str]] = {path: set() for path in allowed}
+
+    def link(source: str, candidates: Iterable[str]) -> None:
+        target = next((candidate for candidate in candidates if candidate in allowed), None)
+        if target and target != source:
+            graph[source].add(target)
+
+    for path, content in source_list:
+        extension = PurePosixPath(path).suffix.lower()
+        if extension in _JS_EXTENSIONS:
+            searchable = _without_comments(content)
+            for expression in (_JS_STATIC, _JS_CALL):
+                for match in expression.finditer(searchable):
+                    link(path, _candidates(path, match.group("path")))
+        if extension != ".py":
+            continue
+        try:
+            parsed = ast.parse(content, filename=path)
+        except (SyntaxError, ValueError):
+            continue
+        parent = list(PurePosixPath(path).parent.parts)
+        if parent == ["."]:
+            parent = []
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    stem = alias.name.replace(".", "/")
+                    link(path, (stem + ".py", stem + "/__init__.py"))
+                continue
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.level:
+                if node.level - 1 > len(parent):
+                    continue
+                root = parent[:len(parent) - node.level + 1]
+            else:
+                root = []
+            module = node.module.split(".") if node.module else []
+            base = "/".join([*root, *module])
+            if base:
+                link(path, (base + ".py", base + "/__init__.py"))
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                candidate = "/".join([base, alias.name]) if base else alias.name
+                link(path, (candidate + ".py", candidate + "/__init__.py"))
+    return graph

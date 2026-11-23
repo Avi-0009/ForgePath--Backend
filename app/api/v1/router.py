@@ -18,6 +18,7 @@ from app.api.v1.routes.project_code_search import router as project_code_search_
 from app.api.v1.routes.project_investigations import router as project_investigations_router
 from app.api.v1.routes.project_semantic_index import router as project_semantic_index_router
 from app.api.v1.routes.project_references import router as project_references_router
+from app.api.v1.routes.project_context_investigation import router as project_context_investigation_router
 
 
 router = APIRouter(prefix="/api/v1")
@@ -40,3 +41,4 @@ router.include_router(project_code_search_router)
 router.include_router(project_investigations_router)
 router.include_router(project_semantic_index_router)
 router.include_router(project_references_router)
+router.include_router(project_context_investigation_router)
