@@ -46,6 +46,7 @@ def build_investigation_context(
     max_files: int = 5,
     *,
     semantic_hits: Iterable[dict] = (),
+    continuity_paths: Iterable[str] = (),
 ) -> dict:
     """Combine lexical relevance, verified import edges, and optional vectors.
 
@@ -89,6 +90,12 @@ def build_investigation_context(
         verified_semantic += 1
         hints.setdefault(path, excerpt[:300])
         add(path, max(50, 135 - rank * 9), "verified semantic match")
+
+    # Continuity paths are merely pointers to the current saved snapshot.
+    # Old conversation evidence is NEVER accepted as evidence without rechecking.
+    for rank, path in enumerate(list(continuity_paths)[:6]):
+        if isinstance(path, str):
+            add(path, max(35, 88 - 6 * rank), "source previously selected in this conversation")
 
     # Expand only one verified import hop. Dependencies are usually the missing
     # implementation; reverse edges can reveal callers and integration tests.
