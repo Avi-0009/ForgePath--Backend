@@ -87,6 +87,11 @@ def test_foreign_project_delete_does_not_purge(monkeypatch):
 
 
 def test_delete_refuses_when_index_store_is_unavailable(tmp_path, monkeypatch):
+    from app.services import project_storage_cleanup
+    broken_store = tmp_path / "missing-db"
+    broken_store.mkdir()
+    (broken_store / "orphan-index").write_text("incomplete", encoding="utf-8")
+    monkeypatch.setattr(project_storage_cleanup, "get_vector_store_path", lambda: broken_store)
     user, project, version = uuid4(), uuid4(), uuid4()
     folder = _snapshot_dirs(tmp_path, monkeypatch, user, project, version)
 

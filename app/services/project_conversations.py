@@ -66,6 +66,11 @@ def _connection():
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS forgepath_deleted_conversation_projects (
+                owner_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                PRIMARY KEY (owner_id, project_id)
+            );
             CREATE TABLE IF NOT EXISTS forgepath_conversation_threads (
                 id TEXT PRIMARY KEY,
                 owner_id TEXT NOT NULL,
@@ -147,6 +152,11 @@ def create_thread(owner: UUID, project: UUID, snapshot_id: UUID, snapshot_sha: s
     with _connection() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM forgepath_deleted_conversation_projects WHERE owner_id = ? AND project_id = ?",
+                (str(owner), str(project)),
+            ).fetchone():
+                raise ConversationNotFound("Project conversation storage has been deleted")
             count = conn.execute(
                 "SELECT COUNT(*) FROM forgepath_conversation_threads WHERE owner_id = ? AND project_id = ?",
                 (str(owner), str(project)),
@@ -174,6 +184,30 @@ def get_thread(owner: UUID, project: UUID, thread: UUID,
     with _connection() as conn:
         row = _row(conn, owner, project, thread)
         return {**_public_thread(row, snapshot_id, snapshot_sha), "turns": _turns(conn, row["id"])}
+
+
+def purge_project_conversations(owner: UUID, project: UUID) -> None:
+    """Delete all snapshots' conversations and block late requests from recreating them.
+
+    The content-free tombstone survives a failed PostgreSQL commit so retrying a
+    partially completed deletion remains safe. Project UUIDs are never reused.
+    """
+    with _connection() as conn:
+        try:
+            conn.execute("PRAGMA secure_delete = ON")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT OR IGNORE INTO forgepath_deleted_conversation_projects (owner_id, project_id) VALUES (?, ?)",
+                (str(owner), str(project)),
+            )
+            conn.execute(
+                "DELETE FROM forgepath_conversation_threads WHERE owner_id = ? AND project_id = ?",
+                (str(owner), str(project)),
+            )
+            conn.commit()  # Foreign keys cascade into every stored turn.
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def delete_thread(owner: UUID, project: UUID, thread: UUID) -> None:

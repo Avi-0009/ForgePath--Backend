@@ -105,7 +105,7 @@ async def conversations_create(
         return await asyncio.to_thread(
             create_thread, user.id, project_id, manifest.snapshot_id, manifest.sha256,
         )
-    except (ConversationStorageError, ConversationLimit) as exc:
+    except (ConversationStorageError, ConversationLimit, ConversationNotFound) as exc:
         raise _store_failure(exc) from exc
 
 

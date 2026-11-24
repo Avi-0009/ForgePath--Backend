@@ -27,10 +27,12 @@ from app.models.project import Project
 from app.models.user import User
 from app.services.project_semantic_index import index_lifecycle_lock, remove_project_semantic_indexes
 from app.services.project_snapshots import (
-    delete_project_snapshot_storage, list_project_snapshot_ids, SnapshotConfigurationError,
+    delete_project_snapshot_storage, SnapshotConfigurationError,
 )
 from app.services.vector_store import VectorStoreError
-from app.services.vector_store import get_vector_store_path
+from app.services.project_storage_cleanup import deletion_index_service
+from app.services.project_index_jobs import ProjectIndexJobManager
+from app.services.project_conversations import purge_project_conversations, ConversationStorageError
 
 
 router = APIRouter(
@@ -275,24 +277,22 @@ async def delete_project(
 
     async with index_lifecycle_lock:
         try:
-            versions = await asyncio.to_thread(list_project_snapshot_ids, current_user.id, project_id)
             service = getattr(request.app.state, "workspace_indexing_service", None)
-            receipt_dir = (
-                get_vector_store_path() / "project-index-receipts"
-                / str(current_user.id) / str(project_id)
-            )
-            if service is None and (versions or receipt_dir.exists()):
-                raise HTTPException(503, "Configure the semantic store to safely purge project data")
-            if service is not None:
-                await asyncio.to_thread(remove_project_semantic_indexes, service, current_user.id, project_id)
             jobs = getattr(request.app.state, "project_index_jobs", None)
-            if jobs is not None:
-                await asyncio.to_thread(jobs.prune, current_user.id, project_id)
+
+            def purge_indexes():
+                with deletion_index_service(service) as cleanup_service:
+                    remove_project_semantic_indexes(cleanup_service, current_user.id, project_id)
+                    cleanup_jobs = jobs if jobs is not None else ProjectIndexJobManager(cleanup_service)
+                    cleanup_jobs.prune(current_user.id, project_id)
+
+            await asyncio.to_thread(purge_indexes)
+            await asyncio.to_thread(purge_project_conversations, current_user.id, project_id)
             await asyncio.to_thread(delete_project_snapshot_storage, current_user.id, project_id)
         except HTTPException:
             raise
-        except (SnapshotConfigurationError, VectorStoreError, OSError, ValueError):
+        except (SnapshotConfigurationError, ConversationStorageError, VectorStoreError, OSError, ValueError):
             logger.exception("Project local data cleanup failed")
-            raise HTTPException(503, "Could not safely purge project data; project was retained") from None
+            raise HTTPException(503, "Project deletion is incomplete; some data may already be removed. Retry deletion.") from None
         await db.delete(project)
         await db.commit()
