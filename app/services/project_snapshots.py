@@ -69,7 +69,16 @@ class SourceFile(BaseModel):
 
 class SourceSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    files: list[SourceFile] = Field(min_length=1, max_length=MAX_SNAPSHOT_FILES)
+
+    files: list[SourceFile] = Field(
+        min_length=1,
+        max_length=MAX_SNAPSHOT_FILES,
+    )
+
+    asset_paths: list[str] = Field(
+        default_factory=list,
+        max_length=1000,
+    )
 
 
 @dataclass(frozen=True)
@@ -128,11 +137,55 @@ def _prepare(snapshot: SourceSnapshot) -> tuple[list[tuple[PurePosixPath, bytes]
             raise SnapshotValidationError("Codebase exceeds the snapshot size limit")
         files.append((path, data))
     files.sort(key=lambda entry: entry[0].as_posix())
+
+    asset_paths = tuple(sorted(
+        _safe_svg_path(path).as_posix()
+        for path in snapshot.asset_paths
+    ))
+
+    if len({path.casefold() for path in asset_paths}) != len(asset_paths):
+        raise SnapshotValidationError("Duplicate SVG asset path")
+    
     for path, data in files:
         digest.update(path.as_posix().encode("utf-8"))
         digest.update(b"\x00")
         digest.update(hashlib.sha256(data).digest())
-    return files, SnapshotManifest(uuid4(), len(files), total, digest.hexdigest())
+    return files, SnapshotManifest(
+        uuid4(),
+        len(files),
+        total,
+        digest.hexdigest(),
+        asset_paths,
+    )
+
+
+def _safe_svg_path(relative_path: str) -> PurePosixPath:
+    if "\\" in relative_path or ":" in relative_path or "\x00" in relative_path:
+        raise SnapshotValidationError("Unsafe SVG path")
+
+    path = PurePosixPath(relative_path)
+
+    if (
+        path.is_absolute()
+        or len(path.parts) > MAX_DEPTH
+        or not path.parts
+        or path.suffix.casefold() != ".svg"
+        or any(
+            part in {"", ".", ".."}
+            or part.startswith(".")
+            or part.casefold() in _SKIP_DIRECTORIES
+            for part in path.parts
+        )
+    ):
+        raise SnapshotValidationError("Invalid SVG asset path")
+
+    if any(
+        word in path.name.casefold()
+        for word in ("secret", "credential", "private_key")
+    ):
+        raise SnapshotValidationError("Sensitive SVG filename")
+
+    return path
 
 
 def _storage_root() -> Path:
@@ -221,6 +274,7 @@ def store_snapshot(user_id: UUID, project_id: UUID, snapshot: SourceSnapshot) ->
                 "file_count": manifest.file_count,
                 "total_bytes": manifest.total_bytes,
                 "sha256": manifest.sha256,
+                "asset_paths": list(manifest.asset_paths),
             }, metadata_file)
         os.chmod(manifest_path, 0o600)
         temporary_pointer = project_directory / f".current-{uuid4().hex}"
@@ -241,8 +295,11 @@ def read_snapshot_manifest(user_id: UUID, project_id: UUID) -> SnapshotManifest 
     manifest_path = project_directory / str(snapshot_id) / "manifest.json"
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     return SnapshotManifest(
-        UUID(data["snapshot_id"]), int(data["file_count"]),
-        int(data["total_bytes"]), str(data["sha256"]),
+        UUID(data["snapshot_id"]),
+        int(data["file_count"]),
+        int(data["total_bytes"]),
+        str(data["sha256"]),
+        tuple(data.get("asset_paths", ())),
     )
 
 
