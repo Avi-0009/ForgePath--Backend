@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         le=90,
     )
 
+    # Require HTTPS for browser refresh cookies by default.
+    # Set REFRESH_COOKIE_SECURE=false ONLY for trusted, HTTP-only local development.
+    refresh_cookie_secure: bool = True
+
     # Brevo transactional email configuration
     brevo_api_key: SecretStr
     brevo_sender_email: EmailStr

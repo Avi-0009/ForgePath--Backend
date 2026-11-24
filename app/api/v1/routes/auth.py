@@ -98,7 +98,7 @@ async def login(
         key="forgepath_refresh",
         value=auth_session.refresh_token,
         httponly=True,
-        secure=False,
+        secure=settings.refresh_cookie_secure,
         samesite="lax",
         max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
         path="/api/v1/auth",
@@ -129,7 +129,7 @@ async def logout(
         key="forgepath_refresh",
         path="/api/v1/auth",
         httponly=True,
-        secure=False,
+        secure=settings.refresh_cookie_secure,
         samesite="lax",
     )
 
@@ -189,7 +189,7 @@ async def refresh_access_token(
         key="forgepath_refresh",
         value=rotated.refresh_token,
         httponly=True,
-        secure=False,
+        secure=settings.refresh_cookie_secure,
         samesite="lax",
         max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
         path="/api/v1/auth",
