@@ -34,6 +34,9 @@ def authenticate_user(monkeypatch):
         id=uuid4(),
         is_active=True,
     )
+    monkeypatch.setattr(settings, "workspace_root_owners", {
+        root: user.id for root in settings.workspace_root_list
+    })
 
     async def override_current_user():
         return user
@@ -201,11 +204,12 @@ def test_prepare_context_rejects_missing_workspace_configuration(
         },
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 503
 
 
 def test_prepare_context_rejects_extra_request_fields(
     api_client,
+    allowed_workspace,
     monkeypatch,
 ):
     authenticate_user(monkeypatch)
@@ -213,7 +217,7 @@ def test_prepare_context_rejects_extra_request_fields(
     response = api_client.post(
         CONTEXT_URL,
         json={
-            "workspace_root": "C:/projects/forgepath",
+            "workspace_root": str(allowed_workspace),
             "include_source_content": True,
         },
         headers={

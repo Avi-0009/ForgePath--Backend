@@ -5,7 +5,9 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Sequence
+from uuid import UUID
 from app.core.config import settings
+from app.core.workspace_access import workspace_access
 
 
 DEFAULT_MAX_FILE_BYTES = 1_000_000  # 1 MB
@@ -161,6 +163,12 @@ def resolve_allowed_workspace_root(
     junctions along the selected child path are rejected.
     """
 
+    access = workspace_access.get()
+    if access is not None:
+        requested = Path(os.path.abspath(Path(workspace_root).expanduser()))
+        if not any(requested.is_relative_to(root) for root in access.roots):
+            raise WorkspaceAccessDenied("Workspace access denied.")
+
     candidates = (
         allowed_workspace_roots
         if allowed_workspace_roots is not None
@@ -285,11 +293,35 @@ def resolve_allowed_workspace_root(
                 "The selected workspace is outside the configured root."
             )
 
+        if access is not None and not any(
+            resolved_requested.is_relative_to(root) for root in access.roots
+        ):
+            raise WorkspaceAccessDenied("Workspace access denied.")
         return resolved_requested
 
     raise WorkspaceAccessDenied(
         "The selected workspace is not inside a configured workspace root."
     )
+
+
+def owned_workspace_roots(user_id: UUID) -> tuple[Path, ...]:
+    """Validate exclusive administrator grants against the global filesystem policy.
+
+    Called before entering request scope. No owner means no access; never infer an
+    owner from the first caller or allow an ancestor grant to expose another user.
+    """
+    grants: list[tuple[Path, UUID]] = []
+    for configured_path, owner_id in settings.workspace_root_owners.items():
+        if not Path(configured_path).is_absolute():
+            raise WorkspaceConfigurationError("Workspace owner roots must be absolute.")
+        root = resolve_allowed_workspace_root(configured_path)
+        for other_root, other_owner in grants:
+            if owner_id != other_owner and (
+                root.is_relative_to(other_root) or other_root.is_relative_to(root)
+            ):
+                raise WorkspaceConfigurationError("Workspace owners have overlapping roots.")
+        grants.append((root, owner_id))
+    return tuple(dict.fromkeys(root for root, owner in grants if owner == user_id))
 
 
 def _validate_relative_path(relative_path: str) -> tuple[str, ...]:

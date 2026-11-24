@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.workspace_access import workspace_access
 from app.schemas.code_patch import (
     CodePatchApplyRequest,
     CodePatchApplyResponse,
@@ -88,6 +89,9 @@ def _backup_directory() -> Path:
         base = Path.home() / ".local" / "share"
 
     directory = base / "ForgePath" / "backups"
+    access = workspace_access.get()
+    if access is not None:
+        directory = directory / str(access.user_id)
     directory.mkdir(parents=True, exist_ok=True)
 
     if not directory.is_dir():

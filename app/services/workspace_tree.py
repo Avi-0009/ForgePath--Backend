@@ -2,11 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.workspace_access import workspace_access
 from app.schemas.workspace import WorkspaceNode
 from app.services.workspace import (
     WorkspaceConfigurationError,
     WorkspaceReadError,
     _validate_relative_path,
+    resolve_allowed_workspace_root,
 )
 
 
@@ -36,6 +38,9 @@ def _is_link_or_junction(path: Path) -> bool:
 
 def _resolve_configured_roots() -> list[Path]:
     """Resolve only the exact roots approved in backend settings."""
+    access = workspace_access.get()
+    if access is not None:
+        return [resolve_allowed_workspace_root(root) for root in access.roots]
     configured_roots = settings.workspace_root_list
 
     if not configured_roots:

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from typing import Annotated
 from uuid import UUID
@@ -17,6 +18,11 @@ from app.models.user import User
 from app.repositories import user as user_repository
 from app.repositories.auth_session import get_session_by_id
 from app.services.workspace_indexing import WorkspaceIndexingService
+from app.core.workspace_access import owned_workspaces
+from app.services.workspace import (
+    WorkspaceAccessDenied, WorkspaceConfigurationError,
+    owned_workspace_roots, resolve_allowed_workspace_root,
+)
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -75,6 +81,37 @@ async def get_current_user(
         raise unauthorized
 
     return user
+
+
+async def require_owned_workspaces(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AsyncGenerator[None, None]:
+    """Bind every legacy router to the authenticated owner's explicit grants."""
+    try:
+        roots = await asyncio.to_thread(owned_workspace_roots, current_user.id)
+    except (WorkspaceConfigurationError, WorkspaceAccessDenied, OSError, ValueError):
+        raise HTTPException(503, "Workspace ownership configuration is unavailable.") from None
+
+    with owned_workspaces(current_user.id, roots):
+        # Check direct filesystem targets before history writes, AI calls or service
+        # fallbacks. The same policy also runs inside filesystem services.
+        target = request.query_params.get("workspace_root")
+        if request.method in {"POST", "PUT", "PATCH"}:
+            try:
+                body = await request.json()
+            except ValueError:
+                body = None  # Let FastAPI report the normal request validation error.
+            if isinstance(body, dict):
+                target = body.get("workspace_root", target)
+        if isinstance(target, str):
+            try:
+                await asyncio.to_thread(resolve_allowed_workspace_root, target)
+            except WorkspaceAccessDenied:
+                raise HTTPException(403, "Workspace access denied.") from None
+            except WorkspaceConfigurationError:
+                raise HTTPException(503, "Workspace ownership configuration is unavailable.") from None
+        yield
 
 
 async def get_current_user_with_usage_context(

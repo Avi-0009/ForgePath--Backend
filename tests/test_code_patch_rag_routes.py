@@ -51,9 +51,12 @@ def api_client(tmp_path, monkeypatch):
     async def override_db():
         yield SimpleNamespace()
 
+    test_user_id = uuid4()
+    monkeypatch.setattr(settings, "workspace_root_owners", {str(workspace_root): test_user_id})
+
     async def override_current_user():
         return SimpleNamespace(
-            id=uuid4(),
+            id=test_user_id,
             is_active=True,
         )
 

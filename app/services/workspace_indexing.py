@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import hashlib
 from typing import Sequence
+from app.core.workspace_access import workspace_access
+from app.services.workspace import WorkspaceAccessDenied, resolve_allowed_workspace_root
 
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_store import (
@@ -96,6 +99,16 @@ class WorkspaceIndexingService:
         self.embedding_service = embedding_service
         self.vector_store = vector_store
 
+    def _storage_namespace(self, workspace_root: str | None) -> str | None:
+        access = workspace_access.get()
+        if access is None:
+            return workspace_root  # Snapshot services already supply owner/version namespaces.
+        if workspace_root is None:
+            raise WorkspaceAccessDenied("A workspace is required for private search.")
+        root = resolve_allowed_workspace_root(workspace_root)
+        digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+        return str(self.vector_store.persist_directory / "legacy-users" / str(access.user_id) / digest)
+
     async def index_document(
         self,
         document: IngestedWorkspaceDocument,
@@ -142,6 +155,7 @@ class WorkspaceIndexingService:
 
         # Check each document before generating chunks or embeddings.
         for document in documents:
+            document = replace(document, workspace_root=self._storage_namespace(document.workspace_root))
 
             file_identity = (
                 document.workspace_root,
@@ -255,6 +269,7 @@ class WorkspaceIndexingService:
                 "All documents must belong to the ingested workspace."
             )
 
+        storage_namespace = self._storage_namespace(ingestion.workspace_root)
         # First index all new and modified documents.
         result = await self.index_documents(
             ingestion.documents
@@ -266,7 +281,7 @@ class WorkspaceIndexingService:
 
         # Get all files currently stored in ChromaDB.
         indexed_paths = self.vector_store.get_workspace_file_paths(
-            workspace_root=ingestion.workspace_root,
+            workspace_root=storage_namespace,
         )
 
         # Get all files observed during the latest filesystem scan.
@@ -290,7 +305,7 @@ class WorkspaceIndexingService:
 
         for relative_path in sorted(paths_to_delete):
             deleted = self.vector_store.delete_file_chunks(
-                workspace_root=ingestion.workspace_root,
+                workspace_root=storage_namespace,
                 relative_path=relative_path,
             )
 
@@ -339,15 +354,21 @@ class WorkspaceIndexingService:
                 "workspace_root is required when excluding a relative_path."
             )
 
+        storage_namespace = self._storage_namespace(workspace_root)
         query_embedding = await self.embedding_service.embed_query(
             query
         )
 
-        return self.vector_store.search(
+        hits = self.vector_store.search(
             query_embedding,
             top_k=top_k,
-            workspace_root=workspace_root,
+            workspace_root=storage_namespace,
             relative_path=relative_path,
             language=language,
             exclude_relative_path=exclude_relative_path,
         )
+        if workspace_access.get() is None:
+            return hits
+        # Keep the public metadata contract, without accepting a foreign namespace.
+        return [replace(hit, metadata={**hit.metadata, "workspace_root": workspace_root})
+                for hit in hits if hit.metadata.get("workspace_root") == storage_namespace]

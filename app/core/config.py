@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import UUID
 
 from pydantic import SecretStr, field_validator, Field, EmailStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -80,6 +81,8 @@ class Settings(BaseSettings):
     )
 
     workspace_allowed_roots: str = ""
+    # Explicit administrator assignments; the global allowlist alone grants no API access.
+    workspace_root_owners: dict[str, UUID] = Field(default_factory=dict)
     project_snapshot_directory: str | None = None
 
     @property

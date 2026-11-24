@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -11,6 +12,10 @@ from fastapi import (
     status,
 )
 from langgraph.types import Command
+from app.core.workspace_access import workspace_access
+from app.services.workspace import (
+    WorkspaceAccessDenied, WorkspaceConfigurationError, resolve_allowed_workspace_root,
+)
 
 from app.api.dependencies import get_current_user_with_usage_context
 from app.core.ai_provider import AIProviderError
@@ -137,6 +142,14 @@ async def _load_owned_snapshot(
             detail="Workflow not found.",
         )
 
+    if workspace_access.get() is not None:
+        try:
+            root = values.get("workspace_root")
+            if not isinstance(root, str):
+                raise WorkspaceAccessDenied("Workspace access denied.")
+            await asyncio.to_thread(resolve_allowed_workspace_root, root)
+        except (WorkspaceAccessDenied, WorkspaceConfigurationError):
+            raise HTTPException(403, "Workspace access denied.") from None
     return normalized_thread_id, snapshot
 
 

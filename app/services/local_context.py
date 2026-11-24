@@ -6,6 +6,8 @@ from pathlib import Path
 import aiosqlite
 
 from app.core.config import settings
+from app.core.workspace_access import workspace_access
+from app.services.workspace import resolve_allowed_workspace_root
 
 
 MAX_INSTRUCTIONS_LENGTH = 50_000
@@ -40,11 +42,18 @@ def _database_path() -> Path:
         if not base:
             base = str(Path.home() / ".local" / "share")
 
-    return Path(base) / "ForgePath" / "context.sqlite3"
+    directory = Path(base) / "ForgePath"
+    access = workspace_access.get()
+    if access is not None:
+        directory = directory / "users" / str(access.user_id)
+    return directory / "context.sqlite3"
 
 
 def _resolve_project_root(project_root: str | Path) -> Path:
     """Require the project root to match a configured workspace."""
+
+    if workspace_access.get() is not None:
+        return resolve_allowed_workspace_root(project_root)
 
     if not settings.workspace_root_list:
         raise LocalContextError(

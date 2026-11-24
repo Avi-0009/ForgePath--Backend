@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, require_owned_workspaces
 from app.core.config import settings
 from app.db.session import get_db
 from app.main import app
@@ -47,6 +47,11 @@ def api_client(monkeypatch):
     app.dependency_overrides.clear()
 
     app.dependency_overrides[get_db] = override_db
+    # These service-error mapping tests use a fictitious path and stub all I/O.
+    # Mounted-router ownership is exercised separately in test_workspace_ownership.
+    async def authorized_workspace():
+        yield
+    app.dependency_overrides[require_owned_workspaces] = authorized_workspace
     app.dependency_overrides[get_current_user] = (
         override_current_user
     )

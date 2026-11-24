@@ -1,4 +1,5 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from app.api.dependencies import require_owned_workspaces
 
 from app.api.v1.routes.auth import router as auth_router
 from app.api.v1.routes.code_review import router as code_review_router
@@ -25,13 +26,11 @@ from app.api.v1.routes.project_conversations import router as project_conversati
 router = APIRouter(prefix="/api/v1")
 
 router.include_router(auth_router)
-router.include_router(code_review_router)
-router.include_router(local_context_router)
-router.include_router(code_patch_router)
-router.include_router(workspace_router)
-router.include_router(test_execution_router)
-router.include_router(task_planning_router)
-router.include_router(agent_orchestration_router)
+for legacy_router in (
+    code_review_router, local_context_router, code_patch_router, workspace_router,
+    test_execution_router, task_planning_router, agent_orchestration_router,
+):
+    router.include_router(legacy_router, dependencies=[Depends(require_owned_workspaces)])
 router.include_router(ai_usage_router)
 router.include_router(projects_router)
 router.include_router(ai_configuration_router)

@@ -33,6 +33,10 @@ def authenticated_client(monkeypatch):
     )
 
     async def override_current_user():
+        # Each test configures its own temporary roots after creating this client.
+        monkeypatch.setattr(settings, "workspace_root_owners", {
+            root: user.id for root in settings.workspace_root_list
+        })
         return user
 
     async def override_db():
@@ -50,6 +54,7 @@ def authenticated_client(monkeypatch):
     )
 
     with TestClient(app) as client:
+        client.test_user_id = user.id
         yield client
 
 
@@ -223,6 +228,7 @@ def test_review_patch_and_apply_workflow(
         local_app_data
         / "ForgePath"
         / "backups"
+        / str(client.test_user_id)
         / f"{apply_data['backup_id']}.bak"
     )
 
@@ -254,6 +260,7 @@ def test_review_patch_and_apply_workflow(
         local_app_data
         / "ForgePath"
         / "backups"
+        / str(client.test_user_id)
         / f"{rollback_data['recovery_backup_id']}.bak"
     )
 
