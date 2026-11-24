@@ -69,6 +69,8 @@ def main() -> int:
             "tests/test_code_review_rag_routes.py", "tests/test_code_patch_rag_routes.py",
             "tests/test_task_planning_routes.py", "tests/test_test_execution_routes.py",
             "tests/test_agent_orchestration_routes.py",
+            "tests/test_project_review_jobs.py", "tests/test_project_review_agent.py",
+            "tests/test_project_review_findings.py",
         ])
 
 

@@ -2,17 +2,21 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func, text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, Index, func, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.dialects.postgresql import JSONB
 
 
 class ProjectReview(Base):
     __tablename__ = "project_reviews"
+    __table_args__ = (Index("uq_project_reviews_active_user", "user_id", unique=True,
+                           postgresql_where=text("status IN ('queued','running')")),)
+
+    lease_token: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), 
@@ -76,10 +80,6 @@ class ProjectReview(Base):
         nullable=False, 
         server_default=func.now(), 
         onupdate=func.now()
-    )
-    result_text: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
     )
     findings: Mapped[list[dict]] = mapped_column(
         JSONB,

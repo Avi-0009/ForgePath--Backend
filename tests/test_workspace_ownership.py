@@ -1,5 +1,6 @@
 """Tenant isolation at the mounted API boundary; no database, Docker or AI calls."""
 import asyncio
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -68,17 +69,35 @@ def test_tree_is_owner_scoped_and_default_denies(client, tenants):
     assert client.get("/api/v1/workspace/tree").status_code == 401
 
 
-def test_every_mounted_legacy_route_has_ownership_dependency():
+def test_every_mounted_legacy_route_has_ownership_dependency(monkeypatch):
     prefixes = tuple("/api/v1/" + prefix for prefix in (
         "workspace", "code-review", "code-patch", "local-context",
         "task-planning", "test-execution", "agent/workflows",
     ))
-    matched = 0
-    for route in app.routes:
-        if getattr(route, "path", "").startswith(prefixes):
-            matched += 1
-            assert any(dep.call is require_owned_workspaces for dep in route.dependant.dependencies), route.path
-    assert matched >= 20
+    # Included routers are nested in newer FastAPI releases. Use the public
+    # schema for discovery, then prove the guard executes on each HTTP operation.
+    operations = [
+        (method, path)
+        for path, item in app.openapi()["paths"].items()
+        if any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
+        for method in item
+        if method in {"get", "post", "put", "patch", "delete"}
+    ]
+    assert len(operations) >= 20
+
+    async def ownership_sentinel():
+        raise HTTPException(418, "workspace-ownership-guard-reached")
+
+    monkeypatch.setitem(app.dependency_overrides, require_owned_workspaces, ownership_sentinel)
+    client = TestClient(app)  # Do not run lifespan or initialize external services.
+    try:
+        for method, path in operations:
+            concrete_path = re.sub(r"\{[^}]+\}", str(uuid4()), path)
+            response = client.request(method, concrete_path)
+            assert response.status_code == 418, (method, path, response.text)
+            assert response.json()["detail"] == "workspace-ownership-guard-reached"
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize("method,path", [
