@@ -21,6 +21,7 @@ from app.api.v1.routes.project_review_tasks import (
     decide_project_review_task_patch,
     decide_project_review_task,
     download_project_review_task_patch,
+    list_project_review_tasks,
 )
 
 
@@ -39,6 +40,12 @@ class FakeResult:
         self.value = value
 
     def scalar_one_or_none(self):
+        return self.value
+
+    def scalars(self):
+        return self
+
+    def all(self):
         return self.value
 
 
@@ -63,11 +70,17 @@ class FakeDatabase:
         pass
 
 
-def test_create_task_checks_owner_and_uses_saved_finding_without_ai():
+def test_create_task_checks_owner_and_uses_saved_finding_without_ai(monkeypatch):
     user = SimpleNamespace(id=uuid4())
 
     project_id = uuid4()
     review_id = uuid4()
+    snapshot_id = uuid4()
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id),
+    )
 
     db = FakeDatabase(
         SimpleNamespace(
@@ -76,7 +89,7 @@ def test_create_task_checks_owner_and_uses_saved_finding_without_ai():
         ),
         SimpleNamespace(
             id=review_id,
-            snapshot_id=uuid4(),
+            snapshot_id=snapshot_id,
             status="completed",
             findings=[FINDING],
         ),
@@ -156,8 +169,14 @@ def test_creating_task_from_foreign_review_is_hidden():
     assert db.added == []
 
 
-def test_duplicate_creation_returns_existing_task():
+def test_duplicate_creation_returns_existing_task(monkeypatch):
     review_id = uuid4()
+    snapshot_id = uuid4()
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id),
+    )
 
     existing = SimpleNamespace(
         status="approved",
@@ -167,7 +186,7 @@ def test_duplicate_creation_returns_existing_task():
         SimpleNamespace(status="ready"),
         SimpleNamespace(
             id=review_id,
-            snapshot_id=uuid4(),
+            snapshot_id=snapshot_id,
             status="completed",
             findings=[FINDING],
         ),
@@ -252,7 +271,9 @@ def _approved_task(project_id, user_id, snapshot_id):
         id=uuid4(),
         user_id=user_id,
         project_id=project_id,
+        review_id=uuid4(),
         snapshot_id=snapshot_id,
+        finding_index=0,
         status="approved",
         planning_status="not_started",
         planning_started_at=None,
@@ -266,12 +287,104 @@ def _approved_task(project_id, user_id, snapshot_id):
         patch=None,
         patch_error=None,
         patched_at=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
         severity="high",
         title="Missing authorization check",
         path="app/routes/projects.py",
         explanation="The handler does not verify project ownership.",
         evidence="project = await db.get(Project, project_id)",
     )
+
+
+def test_task_creation_rejects_review_from_older_snapshot(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    review_id = uuid4()
+    old_snapshot_id = uuid4()
+    db = FakeDatabase(
+        SimpleNamespace(id=project_id, status="ready"),
+        SimpleNamespace(
+            id=review_id,
+            snapshot_id=old_snapshot_id,
+            status="completed",
+            findings=[FINDING],
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=uuid4()),
+    )
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(
+            create_project_review_task(
+                project_id,
+                ProjectReviewTaskCreate(review_id=review_id, finding_index=0),
+                Response(),
+                user,
+                db,
+            )
+        )
+
+    assert exception.value.status_code == 409
+    assert db.added == []
+
+
+def test_task_history_marks_items_from_older_snapshots(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    current_snapshot_id = uuid4()
+    historical_task = _approved_task(project_id, user.id, uuid4())
+    db = FakeDatabase(SimpleNamespace(status="ready"), [historical_task])
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=current_snapshot_id),
+    )
+
+    result = asyncio.run(
+        list_project_review_tasks(
+            project_id,
+            user,
+            db,
+            limit=50,
+            offset=0,
+            include_stale=True,
+        )
+    )
+
+    assert result.current_snapshot_id == current_snapshot_id
+    assert len(result.items) == 1
+    assert result.items[0].is_current_snapshot is False
+    assert "project_review_tasks.snapshot_id =" not in db.queries[1]
+
+
+def test_active_task_list_filters_to_current_snapshot(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    current_snapshot_id = uuid4()
+    db = FakeDatabase(SimpleNamespace(status="ready"), [])
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=current_snapshot_id),
+    )
+
+    result = asyncio.run(
+        list_project_review_tasks(
+            project_id,
+            user,
+            db,
+            limit=50,
+            offset=0,
+            include_stale=False,
+        )
+    )
+
+    assert result.items == []
+    assert "project_review_tasks.snapshot_id =" in db.queries[1]
 
 
 def test_plan_rejects_stale_snapshot_before_ai(monkeypatch):
