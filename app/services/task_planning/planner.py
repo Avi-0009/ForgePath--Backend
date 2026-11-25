@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from app.schemas.task_planning import (
     TaskPlanningResponse,
 )
 from app.services.workspace import (
+    LANGUAGE_BY_EXTENSION,
     WorkspaceAccessDenied,
     WorkspaceConfigurationError,
     WorkspaceReadError,
@@ -260,6 +262,55 @@ def _build_project_snapshot(
     }
 
 
+def _ingest_snapshot_sources(
+    workspace_root: str,
+    sources: list[tuple[str, str]],
+) -> WorkspaceIngestionResult:
+    """Convert already-validated private snapshot sources into planner input."""
+
+    documents: list[IngestedWorkspaceDocument] = []
+    observed_paths = tuple(sorted(path for path, _ in sources))
+    total_bytes = 0
+    files_skipped = 0
+    truncated = False
+
+    for relative_path, content in sorted(sources):
+        encoded = content.encode("utf-8")
+
+        if (
+            len(documents) >= MAX_INGESTION_FILES
+            or len(encoded) > MAX_INGESTION_FILE_BYTES
+            or total_bytes + len(encoded) > MAX_INGESTION_BYTES
+        ):
+            files_skipped += 1
+            truncated = True
+            continue
+
+        total_bytes += len(encoded)
+        extension = Path(relative_path).suffix.casefold()
+        documents.append(
+            IngestedWorkspaceDocument(
+                workspace_root=workspace_root,
+                relative_path=relative_path,
+                language=LANGUAGE_BY_EXTENSION.get(extension, "text"),
+                content=content,
+                sha256=hashlib.sha256(encoded).hexdigest(),
+                size_bytes=len(encoded),
+                line_count=len(content.splitlines()),
+            )
+        )
+
+    return WorkspaceIngestionResult(
+        workspace_root=workspace_root,
+        documents=tuple(documents),
+        files_scanned=len(documents),
+        files_skipped=files_skipped,
+        total_bytes=total_bytes,
+        truncated=truncated,
+        observed_relative_paths=observed_paths,
+    )
+
+
 def _validate_candidate_files(
     plan: TaskPlanningResponse,
     known_paths: set[str],
@@ -291,45 +342,12 @@ def _validate_candidate_files(
     return plan
 
 
-async def generate_task_plan(
+async def _generate_task_plan_from_ingestion(
     request: TaskPlanningRequest,
+    ingestion: WorkspaceIngestionResult,
     *,
     project_instructions: str | None = None,
 ) -> TaskPlanningResponse:
-    """
-    Generate a structured implementation plan for an allowed workspace.
-
-    This service:
-    - Safely inspects a bounded number of project files.
-    - Builds a limited project snapshot.
-    - Sends the task and snapshot to the configured AI provider.
-    - Validates the returned plan against the Pydantic schema.
-    - Removes candidate file paths absent from the snapshot.
-
-    It never modifies files, executes commands, or applies patches.
-    """
-
-    try:
-        ingestion = await asyncio.to_thread(
-            ingest_workspace,
-            request.workspace_root,
-            max_files=MAX_INGESTION_FILES,
-            max_total_bytes=MAX_INGESTION_BYTES,
-            max_file_bytes=MAX_INGESTION_FILE_BYTES,
-        )
-
-    except (
-        WorkspaceAccessDenied,
-        WorkspaceConfigurationError,
-        WorkspaceReadError,
-    ):
-        raise
-
-    except Exception as exc:
-        raise TaskPlanningError(
-            "Could not inspect the selected workspace."
-        ) from exc
-
     snapshot = _build_project_snapshot(ingestion)
 
     saved_instructions = (
@@ -399,3 +417,52 @@ async def generate_task_plan(
     )
 
     return plan
+
+
+async def generate_task_plan(
+    request: TaskPlanningRequest,
+    *,
+    project_instructions: str | None = None,
+) -> TaskPlanningResponse:
+    """Generate a structured implementation plan for an allowed workspace."""
+
+    try:
+        ingestion = await asyncio.to_thread(
+            ingest_workspace,
+            request.workspace_root,
+            max_files=MAX_INGESTION_FILES,
+            max_total_bytes=MAX_INGESTION_BYTES,
+            max_file_bytes=MAX_INGESTION_FILE_BYTES,
+        )
+    except (
+        WorkspaceAccessDenied,
+        WorkspaceConfigurationError,
+        WorkspaceReadError,
+    ):
+        raise
+    except Exception as exc:
+        raise TaskPlanningError(
+            "Could not inspect the selected workspace."
+        ) from exc
+
+    return await _generate_task_plan_from_ingestion(
+        request,
+        ingestion,
+        project_instructions=project_instructions,
+    )
+
+
+async def generate_snapshot_task_plan(
+    request: TaskPlanningRequest,
+    sources: list[tuple[str, str]],
+) -> TaskPlanningResponse:
+    """Plan against a server-owned snapshot without resolving a local path."""
+
+    ingestion = _ingest_snapshot_sources(request.workspace_root, sources)
+
+    if not ingestion.documents:
+        raise TaskPlanningError(
+            "The selected project snapshot contains no planning context."
+        )
+
+    return await _generate_task_plan_from_ingestion(request, ingestion)

@@ -388,3 +388,37 @@ def test_validate_candidate_files_removes_unknown_paths():
     assert result.steps[1].candidate_files_to_inspect == [
         "app/main.py"
     ]
+
+
+def test_snapshot_planner_uses_supplied_sources_without_local_ingestion(
+    monkeypatch,
+):
+    workspace_root = "private-project-snapshot"
+    captured = {}
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Snapshot planning must not inspect a local path")
+
+    async def fake_generate_text(*, instructions, prompt):
+        captured["prompt"] = prompt
+        return json.dumps(make_valid_plan())
+
+    monkeypatch.setattr(planner, "ingest_workspace", forbidden)
+    monkeypatch.setattr(planner, "generate_text", fake_generate_text)
+
+    result = asyncio.run(
+        planner.generate_snapshot_task_plan(
+            make_request(workspace_root),
+            [
+                ("app/main.py", "app = object()"),
+                ("app/services/users.py", "def get_user(): pass"),
+            ],
+        )
+    )
+
+    assert result.workspace_root == workspace_root
+    assert result.steps[0].candidate_files_to_inspect == [
+        "app/services/users.py"
+    ]
+    assert "app/main.py" in captured["prompt"]
+    assert "private-project-snapshot" in captured["prompt"]
