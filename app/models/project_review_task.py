@@ -44,7 +44,7 @@ class ProjectReviewTask(Base):
             name="ck_project_review_tasks_planning_status",
         ),
         CheckConstraint(
-            "patch_status IN ('not_started', 'generating', 'ready', 'approved', 'rejected', 'failed')",
+            "patch_status IN ('not_started', 'generating', 'ready', 'approved', 'rejected', 'failed', 'applied')",
             name="ck_project_review_tasks_patch_status",
         ),
         CheckConstraint(
@@ -186,6 +186,16 @@ class ProjectReviewTask(Base):
     )
 
     patched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    applied_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        nullable=True,
+    )
+
+    applied_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )

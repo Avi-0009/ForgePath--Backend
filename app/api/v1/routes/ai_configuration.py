@@ -2,7 +2,7 @@
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
@@ -18,6 +18,8 @@ Provider = Literal["nvidia", "openai", "huggingface"]
 
 
 class ConfigurationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider: Provider
     model_identifier: str = Field(min_length=1, max_length=200)
     api_key: SecretStr | None = None
@@ -32,7 +34,7 @@ class ConfigurationUpdate(BaseModel):
 
 
 class ConfigurationResponse(BaseModel):
-    provider: str | None
+    provider: Provider | None
     model_identifier: str | None
     has_api_key: bool
 
@@ -58,8 +60,18 @@ async def save_configuration(
     key = payload.api_key.get_secret_value() if payload.api_key is not None else None
     if key is not None:
         key = key.strip()
-        if not key or len(key) > 4096:
-            raise HTTPException(422, "API key must contain 1–4096 characters")
+        if (
+            not key
+            or len(key) > 4096
+            or any(
+                ord(character) < 33 or ord(character) > 126
+                for character in key
+            )
+        ):
+            raise HTTPException(
+                422,
+                "API key must contain 1–4096 printable ASCII characters",
+            )
     if record is None and key is None:
         raise HTTPException(422, "API key is required for a new configuration")
     if record is not None and record.provider != payload.provider and key is None:

@@ -287,6 +287,8 @@ def _approved_task(project_id, user_id, snapshot_id):
         patch=None,
         patch_error=None,
         patched_at=None,
+        applied_snapshot_id=None,
+        applied_at=None,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         severity="high",

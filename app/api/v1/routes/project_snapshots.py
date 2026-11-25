@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
@@ -14,6 +15,7 @@ from uuid import UUID
 from app.api.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.project import Project
+from app.models.project_review_task import ProjectReviewTask
 from app.models.user import User
 from app.services.project_snapshots import (
     MAX_SNAPSHOT_BYTES,
@@ -25,6 +27,7 @@ from app.services.project_snapshots import (
     store_snapshot,
 )
 from app.services.project_semantic_index import index_lifecycle_lock, remove_project_semantic_indexes
+from app.services.project_patch_reconciliation import find_applied_patch_task_ids
 from app.services.vector_store import VectorStoreError
 
 
@@ -97,6 +100,31 @@ async def upload_project_snapshot(
                 list_project_snapshot_ids, user.id, project_id,
             )) > 1
 
+    approved_tasks = (
+        await db.execute(
+            select(ProjectReviewTask)
+            .where(
+                ProjectReviewTask.user_id == user.id,
+                ProjectReviewTask.project_id == project_id,
+                ProjectReviewTask.patch_status == "approved",
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    applied_ids = find_applied_patch_task_ids(
+        approved_tasks,
+        (
+            (source.relative_path, source.content)
+            for source in payload.files
+        ),
+    )
+    applied_at = datetime.now(timezone.utc)
+    for task in approved_tasks:
+        if task.id in applied_ids:
+            task.patch_status = "applied"
+            task.applied_snapshot_id = manifest.snapshot_id
+            task.applied_at = applied_at
+
     project.status = "ready"
     await db.commit()
     return {
@@ -107,6 +135,7 @@ async def upload_project_snapshot(
         "sha256": manifest.sha256,
         "status": "ready",
         "index_cleanup_pending": cleanup_pending,
+        "applied_patch_count": len(applied_ids),
     }
 
 

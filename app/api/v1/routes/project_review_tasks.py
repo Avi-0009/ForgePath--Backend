@@ -113,11 +113,14 @@ class ProjectReviewTaskResponse(BaseModel):
     planning_error: str | None
     planned_at: datetime | None
     patch_status: Literal[
-        "not_started", "generating", "ready", "approved", "rejected", "failed"
+        "not_started", "generating", "ready", "approved", "rejected", "failed",
+        "applied",
     ]
     patch: CodePatchResponse | None
     patch_error: str | None
     patched_at: datetime | None
+    applied_snapshot_id: UUID | None
+    applied_at: datetime | None
     is_current_snapshot: bool = True
     created_at: datetime
     updated_at: datetime
