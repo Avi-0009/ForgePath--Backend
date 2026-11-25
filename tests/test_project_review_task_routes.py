@@ -20,6 +20,7 @@ from app.api.v1.routes.project_review_tasks import (
     create_project_review_task_patch,
     decide_project_review_task_patch,
     decide_project_review_task,
+    download_project_review_task_patch,
 )
 
 
@@ -632,3 +633,69 @@ def test_successful_patch_is_saved_without_applying_snapshot(monkeypatch):
     assert result.patch["patch_applied"] is False
     assert result.patched_at is not None
     assert db.commits == 2
+
+
+def test_approved_patch_download_revalidates_and_rebuilds_diff(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    snapshot_id = uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    original = "def route():\n    return project\n"
+    proposed = "def route():\n    return owned_project\n"
+    task.patch_status = "approved"
+    task.patch = {
+        "relative_path": task.path,
+        "original_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+        "proposed_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+        "proposed_code": proposed,
+        "diff": "corrupted stored diff must not be exported",
+    }
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_sources",
+        lambda *_: [(task.path, original)],
+    )
+
+    response = asyncio.run(
+        download_project_review_task_patch(
+            project_id,
+            task.id,
+            user,
+            db,
+        )
+    )
+
+    body = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-disposition"].endswith('.diff"')
+    assert "corrupted stored diff" not in body
+    assert "-    return project" in body
+    assert "+    return owned_project" in body
+
+
+def test_unapproved_patch_cannot_be_downloaded(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    task = _planned_task(project_id, user.id, uuid4())
+    task.patch_status = "ready"
+    task.patch = {"relative_path": task.path}
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(
+            download_project_review_task_patch(
+                project_id,
+                task.id,
+                user,
+                db,
+            )
+        )
+
+    assert exception.value.status_code == 409

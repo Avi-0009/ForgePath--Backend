@@ -5,6 +5,7 @@ may call the configured AI provider, but it cannot run code or apply patches.
 """
 
 import asyncio
+import difflib
 import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -117,12 +118,14 @@ class ProjectReviewTaskResponse(BaseModel):
     patch: CodePatchResponse | None
     patch_error: str | None
     patched_at: datetime | None
+    is_current_snapshot: bool = True
     created_at: datetime
     updated_at: datetime
 
 
 class ProjectReviewTaskListResponse(BaseModel):
     items: list[ProjectReviewTaskResponse]
+    current_snapshot_id: UUID
     limit: int
     offset: int
 
@@ -202,6 +205,19 @@ async def create_project_review_task(
         raise HTTPException(
             status_code=409,
             detail="Review is not finished",
+        )
+
+    try:
+        manifest = await asyncio.to_thread(
+            read_snapshot_manifest, user.id, project_id,
+        )
+    except SnapshotConfigurationError:
+        raise HTTPException(503, "Project snapshot storage is unavailable") from None
+
+    if manifest is None or manifest.snapshot_id != review.snapshot_id:
+        raise HTTPException(
+            409,
+            "This review belongs to an older project snapshot. Review the current snapshot.",
         )
 
     finding = get_task_finding(
@@ -733,6 +749,94 @@ async def decide_project_review_task_patch(
     return task
 
 
+async def _build_verified_patch_export(
+    user_id: UUID,
+    project_id: UUID,
+    task: ProjectReviewTask,
+) -> str:
+    if task.patch_status != "approved" or not isinstance(task.patch, dict):
+        raise HTTPException(409, "Approve the patch proposal before exporting it")
+
+    try:
+        manifest = await asyncio.to_thread(
+            read_snapshot_manifest, user_id, project_id,
+        )
+        sources = await asyncio.to_thread(
+            read_snapshot_sources, user_id, project_id, task.snapshot_id,
+        )
+    except (SnapshotConfigurationError, SnapshotValidationError):
+        raise HTTPException(409, "Project snapshot is no longer valid") from None
+
+    if manifest is None or manifest.snapshot_id != task.snapshot_id:
+        raise HTTPException(409, "The approved proposal belongs to an older snapshot")
+
+    source_content = dict(sources).get(task.path)
+    proposed_code = task.patch.get("proposed_code")
+    proposed_sha256 = task.patch.get("proposed_sha256")
+
+    if (
+        source_content is None
+        or not isinstance(proposed_code, str)
+        or not isinstance(proposed_sha256, str)
+        or task.patch.get("relative_path") != task.path
+        or hashlib.sha256(source_content.encode("utf-8")).hexdigest()
+        != task.patch.get("original_sha256")
+        or hashlib.sha256(proposed_code.encode("utf-8")).hexdigest()
+        != proposed_sha256
+    ):
+        raise HTTPException(409, "The approved proposal failed its integrity check")
+
+    diff = "".join(
+        difflib.unified_diff(
+            source_content.splitlines(keepends=True),
+            proposed_code.splitlines(keepends=True),
+            fromfile=f"a/{task.path}",
+            tofile=f"b/{task.path}",
+        )
+    )
+    if not diff:
+        raise HTTPException(409, "The approved proposal contains no changes")
+
+    return diff
+
+
+@router.get("/{project_id}/tasks/{task_id}/patch/download")
+async def download_project_review_task_patch(
+    project_id: UUID,
+    task_id: UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Export an approved, revalidated proposal without writing project files."""
+
+    await _owned_project(db, user.id, project_id)
+    task = (
+        await db.execute(
+            select(ProjectReviewTask).where(
+                ProjectReviewTask.id == task_id,
+                ProjectReviewTask.project_id == project_id,
+                ProjectReviewTask.user_id == user.id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if task is None:
+        raise HTTPException(404, "Task not found")
+
+    diff = await _build_verified_patch_export(user.id, project_id, task)
+    filename = f"forgepath-{task.id}.diff"
+
+    return Response(
+        content=diff,
+        media_type="text/x-diff",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get(
     "/{project_id}/tasks",
     response_model=ProjectReviewTaskListResponse,
@@ -743,16 +847,33 @@ async def list_project_review_tasks(
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    include_stale: bool = Query(default=False),
 ) -> ProjectReviewTaskListResponse:
 
     await _owned_project(db, user.id, project_id)
 
-    result = await db.execute(
-        select(ProjectReviewTask)
-        .where(
-            ProjectReviewTask.project_id == project_id,
-            ProjectReviewTask.user_id == user.id,
+    try:
+        manifest = await asyncio.to_thread(
+            read_snapshot_manifest, user.id, project_id,
         )
+    except SnapshotConfigurationError:
+        raise HTTPException(503, "Project snapshot storage is unavailable") from None
+
+    if manifest is None:
+        raise HTTPException(409, "Project snapshot is unavailable")
+
+    query = select(ProjectReviewTask).where(
+        ProjectReviewTask.project_id == project_id,
+        ProjectReviewTask.user_id == user.id,
+    )
+
+    if not include_stale:
+        query = query.where(
+            ProjectReviewTask.snapshot_id == manifest.snapshot_id,
+        )
+
+    result = await db.execute(
+        query
         .order_by(
             ProjectReviewTask.created_at.desc(),
             ProjectReviewTask.id.desc(),
@@ -763,9 +884,14 @@ async def list_project_review_tasks(
 
     return ProjectReviewTaskListResponse(
         items=[
-            ProjectReviewTaskResponse.model_validate(task)
+            ProjectReviewTaskResponse.model_validate(task).model_copy(
+                update={
+                    "is_current_snapshot": task.snapshot_id == manifest.snapshot_id,
+                }
+            )
             for task in result.scalars().all()
         ],
+        current_snapshot_id=manifest.snapshot_id,
         limit=limit,
         offset=offset,
     )
