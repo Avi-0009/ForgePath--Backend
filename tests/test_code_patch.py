@@ -10,6 +10,7 @@ from app.services.code_patch import (
     CodePatchError,
     StaleSourceFileError,
     generate_code_patch,
+    generate_snapshot_code_patch,
 )
 from app.services.workspace import WorkspaceFile
 
@@ -181,3 +182,37 @@ def test_rejects_proposal_with_no_changes(monkeypatch):
                 make_request(source_file.sha256)
             )
         )
+
+
+def test_snapshot_patch_uses_supplied_content_without_local_file_access(
+    monkeypatch,
+):
+    source_hash = hashlib.sha256(SOURCE.encode("utf-8")).hexdigest()
+    request = make_request(source_hash)
+
+    monkeypatch.setattr(
+        "app.services.code_patch.read_configured_workspace_file",
+        Mock(side_effect=AssertionError("Snapshot patch must not read a local path")),
+    )
+    generator = AsyncMock(return_value=make_proposal())
+    monkeypatch.setattr("app.services.code_patch.generate_text", generator)
+
+    result = asyncio.run(
+        generate_snapshot_code_patch(request, SOURCE, language="python")
+    )
+
+    assert result.original_sha256 == source_hash
+    assert result.proposed_code == FIXED_SOURCE
+    assert result.patch_applied is False
+    generator.assert_awaited_once()
+
+
+def test_snapshot_patch_rejects_unexpected_content_before_ai(monkeypatch):
+    request = make_request("0" * 64)
+    generator = AsyncMock(return_value=make_proposal())
+    monkeypatch.setattr("app.services.code_patch.generate_text", generator)
+
+    with pytest.raises(StaleSourceFileError):
+        asyncio.run(generate_snapshot_code_patch(request, SOURCE))
+
+    generator.assert_not_awaited()

@@ -114,6 +114,76 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return result
 
 
+async def _request_patch_proposal(input_data: dict[str, Any]) -> _PatchProposal:
+    try:
+        with ai_usage_context(operation="code_patch"):
+            raw_result = await generate_text(
+                instructions=PATCH_INSTRUCTIONS,
+                prompt=(
+                    "Propose the smallest appropriate fix for the finding "
+                    "in the following JSON input. Return the complete file.\n\n"
+                    + json.dumps(input_data, ensure_ascii=False)
+                ),
+            )
+    except AIProviderError:
+        raise
+
+    result_object = _extract_json_object(raw_result)
+
+    try:
+        return _PatchProposal.model_validate(result_object)
+    except ValidationError as exc:
+        raise CodePatchError(
+            "The AI provider returned an invalid patch proposal."
+        ) from exc
+
+
+def _build_patch_response(
+    relative_path: str,
+    original_content: str,
+    original_sha256: str,
+    proposal: _PatchProposal,
+) -> CodePatchResponse:
+    proposed_code = proposal.proposed_code
+
+    if not proposed_code.strip():
+        raise CodePatchError(
+            "The AI provider proposed an empty source file."
+        )
+    if proposed_code == original_content:
+        raise CodePatchError(
+            "The AI provider proposed no changes for this finding."
+        )
+
+    diff = "".join(
+        difflib.unified_diff(
+            original_content.splitlines(keepends=True),
+            proposed_code.splitlines(keepends=True),
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+        )
+    )
+
+    if not diff:
+        raise CodePatchError(
+            "Could not produce a meaningful diff for the proposed change."
+        )
+
+    return CodePatchResponse(
+        relative_path=relative_path,
+        original_sha256=original_sha256,
+        proposed_sha256=hashlib.sha256(
+            proposed_code.encode("utf-8")
+        ).hexdigest(),
+        original_line_count=len(original_content.splitlines()),
+        proposed_line_count=len(proposed_code.splitlines()),
+        summary=proposal.summary,
+        diff=diff,
+        proposed_code=proposed_code,
+        patch_applied=False,
+    )
+
+
 async def generate_code_patch(
     request: CodePatchRequest,
     *,
@@ -189,36 +259,16 @@ async def generate_code_patch(
         "additional_context": request.additional_context,
     }
 
-    try:
-        with ai_usage_context(operation="code_patch"):
-            raw_result = await generate_text(
-                instructions=PATCH_INSTRUCTIONS,
-                prompt=(
-                    "Propose the smallest appropriate fix for the finding "
-                    "in the following JSON input. Return the complete file.\n\n"
-                    + json.dumps(input_data, ensure_ascii=False)
-                ),
-            )
-    except AIProviderError:
-        raise
+    proposal = await _request_patch_proposal(input_data)
 
-    result_object = _extract_json_object(raw_result)
-
-    try:
-        proposal = _PatchProposal.model_validate(result_object)
-    except ValidationError as exc:
-        raise CodePatchError(
-            "The AI provider returned an invalid patch proposal."
-        ) from exc
-
-    proposed_code = proposal.proposed_code
-
-    if not proposed_code.strip():
+    # Reject an unusable proposal before the second filesystem read. Besides
+    # failing faster, this preserves the guarantee that stale-source rechecks
+    # happen only for a proposal that could actually be returned.
+    if not proposal.proposed_code.strip():
         raise CodePatchError(
             "The AI provider proposed an empty source file."
         )
-
-    if proposed_code == source.content:
+    if proposal.proposed_code == source.content:
         raise CodePatchError(
             "The AI provider proposed no changes for this finding."
         )
@@ -240,33 +290,53 @@ async def generate_code_patch(
             "Discard this proposal and review the latest version."
         )
 
-    original_lines = source.content.splitlines(keepends=True)
-    proposed_lines = proposed_code.splitlines(keepends=True)
-
-    diff = "".join(
-        difflib.unified_diff(
-            original_lines,
-            proposed_lines,
-            fromfile=f"a/{source.relative_path}",
-            tofile=f"b/{source.relative_path}",
-        )
+    return _build_patch_response(
+        source.relative_path,
+        source.content,
+        source.sha256,
+        proposal,
     )
 
-    if not diff:
+
+async def generate_snapshot_code_patch(
+    request: CodePatchRequest,
+    source_content: str,
+    *,
+    language: str = "unknown",
+) -> CodePatchResponse:
+    """Generate a proposal from caller-verified immutable snapshot content."""
+
+    source_sha256 = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
+
+    if source_sha256 != request.expected_sha256:
+        raise StaleSourceFileError(
+            "The snapshot source does not match the expected file version."
+        )
+    if len(source_content) > MAX_PATCH_INPUT_CHARACTERS:
         raise CodePatchError(
-            "Could not produce a meaningful diff for the proposed change."
+            "The source file exceeds the patch-generation character limit."
         )
 
-    return CodePatchResponse(
-        relative_path=source.relative_path,
-        original_sha256=source.sha256,
-        proposed_sha256=hashlib.sha256(
-            proposed_code.encode("utf-8")
-        ).hexdigest(),
-        original_line_count=source.line_count,
-        proposed_line_count=len(proposed_code.splitlines()),
-        summary=proposal.summary,
-        diff=diff,
-        proposed_code=proposed_code,
-        patch_applied=False,
+    proposal = await _request_patch_proposal({
+        "relative_path": request.relative_path,
+        "language": language,
+        "source_code": source_content,
+        "finding": {
+            "title": request.finding_title,
+            "evidence": request.finding_evidence,
+            "explanation": request.finding_explanation,
+            "suggested_fix": request.suggested_fix,
+        },
+        "project_instructions": "No saved project instructions.",
+        "related_workspace_context": (
+            "No additional snapshot files were supplied for this single-file proposal."
+        ),
+        "additional_context": request.additional_context,
+    })
+
+    return _build_patch_response(
+        request.relative_path,
+        source_content,
+        source_sha256,
+        proposal,
     )

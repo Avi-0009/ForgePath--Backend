@@ -1,6 +1,7 @@
 """Task APIs require owned projects/reviews and never start agent work."""
 
 import asyncio
+import hashlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
@@ -12,8 +13,12 @@ from app.api.v1.routes.project_review_tasks import (
     ProjectReviewTaskCreate,
     ProjectReviewTaskDecision,
     ProjectReviewTaskPlanCreate,
+    ProjectReviewTaskPatchCreate,
+    ProjectReviewTaskPatchDecision,
     create_project_review_task,
     create_project_review_task_plan,
+    create_project_review_task_patch,
+    decide_project_review_task_patch,
     decide_project_review_task,
 )
 
@@ -254,6 +259,12 @@ def _approved_task(project_id, user_id, snapshot_id):
         planning_error=None,
         plan=None,
         planned_at=None,
+        patch_status="not_started",
+        patch_started_at=None,
+        patch_token=None,
+        patch=None,
+        patch_error=None,
+        patched_at=None,
         severity="high",
         title="Missing authorization check",
         path="app/routes/projects.py",
@@ -310,7 +321,7 @@ def test_ready_plan_is_idempotent_without_ai(monkeypatch):
 
     monkeypatch.setattr(
         "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
-        lambda *_: SimpleNamespace(snapshot_id=snapshot_id),
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="digest"),
     )
 
     async def forbidden(*_args, **_kwargs):
@@ -348,7 +359,7 @@ def test_active_planning_fence_rejects_duplicate_ai_call(monkeypatch):
 
     monkeypatch.setattr(
         "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
-        lambda *_: SimpleNamespace(snapshot_id=snapshot_id),
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="digest"),
     )
 
     async def forbidden(*_args, **_kwargs):
@@ -391,7 +402,7 @@ def test_successful_plan_is_saved_with_fencing_token(monkeypatch):
 
     monkeypatch.setattr(
         "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
-        lambda *_: SimpleNamespace(snapshot_id=snapshot_id),
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="digest"),
     )
     monkeypatch.setattr(
         "app.api.v1.routes.project_review_tasks.read_snapshot_sources",
@@ -431,4 +442,193 @@ def test_successful_plan_is_saved_with_fencing_token(monkeypatch):
     assert result.planning_token is None
     assert result.plan["plan_id"]
     assert result.planned_at is not None
+    assert db.commits == 2
+
+
+def _planned_task(project_id, user_id, snapshot_id):
+    task = _approved_task(project_id, user_id, snapshot_id)
+    task.planning_status = "ready"
+    task.plan = {
+        "plan_id": str(uuid4()),
+        "objective": "Enforce project ownership before returning data.",
+        "steps": [],
+    }
+    return task
+
+
+def test_patch_rejects_wrong_plan_before_ai(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    snapshot_id = uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="digest"),
+    )
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("A mismatched plan must not call AI")
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.generate_snapshot_code_patch",
+        forbidden,
+    )
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(
+            create_project_review_task_patch(
+                project_id,
+                task.id,
+                ProjectReviewTaskPatchCreate(
+                    expected_snapshot_id=snapshot_id,
+                    expected_plan_id=uuid4(),
+                ),
+                user,
+                db,
+            )
+        )
+
+    assert exception.value.status_code == 409
+    assert db.commits == 0
+
+
+def test_active_patch_fence_rejects_duplicate_ai_call(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    snapshot_id = uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    task.patch_status = "generating"
+    task.patch_started_at = datetime.now(timezone.utc)
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="digest"),
+    )
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(
+            create_project_review_task_patch(
+                project_id,
+                task.id,
+                ProjectReviewTaskPatchCreate(
+                    expected_snapshot_id=snapshot_id,
+                    expected_plan_id=task.plan["plan_id"],
+                ),
+                user,
+                db,
+            )
+        )
+
+    assert exception.value.status_code == 409
+    assert db.commits == 0
+
+
+def test_patch_approval_records_decision_without_applying_files(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    task = _planned_task(project_id, user.id, uuid4())
+    task.patch_status = "ready"
+    source_content = "def route():\n    return project\n"
+    original_sha256 = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
+    proposed_sha256 = "a" * 64
+    task.patch = {
+        "diff": "--- a/file\n+++ b/file",
+        "original_sha256": original_sha256,
+        "proposed_sha256": proposed_sha256,
+    }
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=task.snapshot_id),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_sources",
+        lambda *_: [(task.path, source_content)],
+    )
+
+    result = asyncio.run(
+        decide_project_review_task_patch(
+            project_id,
+            task.id,
+            ProjectReviewTaskPatchDecision(
+                status="approved",
+                expected_snapshot_id=task.snapshot_id,
+                expected_proposed_sha256=proposed_sha256,
+            ),
+            user,
+            db,
+        )
+    )
+
+    assert result.patch_status == "approved"
+    assert db.commits == 1
+
+
+def test_successful_patch_is_saved_without_applying_snapshot(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    snapshot_id = uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    completed_task = _planned_task(project_id, user.id, snapshot_id)
+    completed_task.id = task.id
+    completed_task.plan = task.plan
+    db = FakeDatabase(
+        SimpleNamespace(status="ready"),
+        task,
+        completed_task,
+    )
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="digest"),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_sources",
+        lambda *_: [(task.path, "def route():\n    return project\n")],
+    )
+
+    class Proposal:
+        def model_dump(self, *, mode):
+            assert mode == "json"
+            return {
+                "relative_path": task.path,
+                "diff": "--- a/file\n+++ b/file",
+                "patch_applied": False,
+            }
+
+    async def generate(request, source_content, *, language):
+        assert request.workspace_root == "private-project-snapshot"
+        assert request.relative_path == task.path
+        assert "return project" in source_content
+        assert language == "python"
+        completed_task.patch_token = task.patch_token
+        return Proposal()
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.generate_snapshot_code_patch",
+        generate,
+    )
+
+    result = asyncio.run(
+        create_project_review_task_patch(
+            project_id,
+            task.id,
+            ProjectReviewTaskPatchCreate(
+                expected_snapshot_id=snapshot_id,
+                expected_plan_id=task.plan["plan_id"],
+            ),
+            user,
+            db,
+        )
+    )
+
+    assert result is completed_task
+    assert result.patch_status == "ready"
+    assert result.patch_token is None
+    assert result.patch["patch_applied"] is False
+    assert result.patched_at is not None
     assert db.commits == 2

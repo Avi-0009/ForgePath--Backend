@@ -66,6 +66,7 @@ def main() -> int:
             "tests/test_workspace_context_routes.py", "tests/test_workspace_indexing.py",
             "tests/test_workspace_review_context.py", "tests/test_local_context.py",
             "tests/test_code_patch_apply.py", "tests/test_code_review_workflow.py",
+            "tests/test_code_patch.py",
             "tests/test_code_review_rag_routes.py", "tests/test_code_patch_rag_routes.py",
             "tests/test_task_planning_routes.py", "tests/test_test_execution_routes.py",
             "tests/test_agent_orchestration_routes.py",

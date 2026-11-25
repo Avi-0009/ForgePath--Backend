@@ -44,6 +44,10 @@ class ProjectReviewTask(Base):
             name="ck_project_review_tasks_planning_status",
         ),
         CheckConstraint(
+            "patch_status IN ('not_started', 'generating', 'ready', 'approved', 'rejected', 'failed')",
+            name="ck_project_review_tasks_patch_status",
+        ),
+        CheckConstraint(
             "severity IN ('critical', 'high', 'medium', 'low', 'info')",
             name="ck_project_review_tasks_severity",
         ),
@@ -150,6 +154,38 @@ class ProjectReviewTask(Base):
     )
 
     planned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    patch_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="not_started",
+        server_default=text("'not_started'"),
+    )
+
+    patch_token: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        nullable=True,
+    )
+
+    patch_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    patch: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    patch_error: Mapped[str | None] = mapped_column(
+        String(300),
+        nullable=True,
+    )
+
+    patched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
