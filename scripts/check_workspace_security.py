@@ -80,6 +80,7 @@ def main() -> int:
             "tests/test_project_patch_reconciliation.py",
             "tests/test_project_snapshot_reconciliation_routes.py",
             "tests/test_task_planning.py",
+            "tests/test_sqlite_storage_isolation.py",
             "tests/test_project_deletion.py", "tests/test_project_index_lifecycle.py",
             "tests/test_project_conversations.py", "tests/test_project_conversations_routes.py",
         ])

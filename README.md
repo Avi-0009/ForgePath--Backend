@@ -167,6 +167,8 @@ python -B -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 The conversation SQLite database contains questions, reports, and verified source quotations in plaintext. Restrict its permissions and back it up only when history must be retained.
 
+Legacy local-instruction SQLite files are stored in per-user directories when an authenticated workspace scope is active. Investigation conversations share one configured SQLite file but every operation is constrained by both owner and project identifiers.
+
 ## Primary API areas
 
 All application endpoints are under `/api/v1`.
@@ -229,6 +231,8 @@ Run the isolated security/regression suite without loading `.env`, contacting pr
 ```powershell
 python -B scripts/check_workspace_security.py
 ```
+
+This suite creates temporary SQLite databases and verifies owner isolation, WAL persistence, integrity checks, conversation deletion boundaries, and legacy instruction separation. It never uses a production SQLite file.
 
 Run the complete suite when the test environment is configured:
 
