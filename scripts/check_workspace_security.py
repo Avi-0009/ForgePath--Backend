@@ -71,6 +71,7 @@ def main() -> int:
             "tests/test_task_planning_routes.py", "tests/test_test_execution_routes.py",
             "tests/test_agent_orchestration_routes.py",
             "tests/test_ai_configuration_routes.py",
+            "tests/test_auth_cookie_security.py", "tests/test_auth_session_revocation.py",
             "tests/test_profile_update.py",
             "tests/test_project_review_jobs.py", "tests/test_project_review_agent.py",
             "tests/test_project_review_findings.py",

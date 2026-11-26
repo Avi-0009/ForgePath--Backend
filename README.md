@@ -6,7 +6,7 @@ Built with FastAPI, SQLAlchemy, PostgreSQL, Alembic, SQLite, Chroma, and LangGra
 
 ## What is implemented
 
-- Account registration, login, refresh sessions, profile updates, email verification, and password reset.
+- Account registration, login, refresh-session rotation/revocation, profile updates, email verification, and password reset.
 - User-owned projects and immutable private source snapshots.
 - Initial codebase reviews with durable job state, leases, retry handling, and AI-usage tracking.
 - File investigation, code search, reference-integrity checks, and context-aware reports.
@@ -210,6 +210,7 @@ Approval of a plan or patch never edits a file by itself. Local application requ
 ## Security boundaries
 
 - Every project, review, task, snapshot, conversation, and semantic namespace is user-scoped.
+- Sign-out revokes the hashed refresh-session record and removes the HTTP-only refresh cookie.
 - Snapshot paths are relative, bounded, extension-checked, and screened for sensitive filenames and credential-like content.
 - Snapshots are immutable and checksum-verified when read.
 - Plans, patches, decisions, and exports are pinned to exact snapshots and hashes.
