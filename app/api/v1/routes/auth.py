@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
+    ProfileUpdateRequest,
     SignupRequest,
     TokenResponse,
     UserResponse,
@@ -22,6 +23,7 @@ from app.services.auth import (
     InvalidCredentialsError,
     authenticate_user,
     register_user,
+    update_user_profile,
 )
 from app.repositories import user as user_repository
 from app.core.config import settings
@@ -143,6 +145,25 @@ async def me(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> User:
     return current_user
+
+
+@router.patch(
+    "/me",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def update_me(
+    payload: ProfileUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    try:
+        return await update_user_profile(db, current_user, payload)
+    except AccountAlreadyExistsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This username is already taken.",
+        ) from exc
 
 
 @router.post(

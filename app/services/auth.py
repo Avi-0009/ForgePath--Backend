@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import hash_password, verify_password
 from app.models.user import User
 from app.repositories import user as user_repository
-from app.schemas.auth import LoginRequest, SignupRequest
+from app.schemas.auth import LoginRequest, ProfileUpdateRequest, SignupRequest
 
 
 class AccountAlreadyExistsError(Exception):
@@ -17,6 +17,20 @@ class AccountAlreadyExistsError(Exception):
 
 class InvalidCredentialsError(Exception):
     """The supplied login credentials are invalid."""
+
+
+def _integrity_conflict_field(exc: IntegrityError) -> str | None:
+    constraint_name = getattr(
+        getattr(exc.orig, "diag", None),
+        "constraint_name",
+        None,
+    )
+    message = str(exc.orig).casefold()
+    if constraint_name == "uq_users_email" or "users.email" in message:
+        return "email"
+    if constraint_name == "uq_users_username" or "users.username" in message:
+        return "username"
+    return None
 
 
 async def register_user(
@@ -54,18 +68,38 @@ async def register_user(
     except IntegrityError as exc:
         await db.rollback()
 
-        constraint_name = getattr(
-            getattr(exc.orig, "diag", None),
-            "constraint_name",
-            None,
-        )
+        conflict_field = _integrity_conflict_field(exc)
+        if conflict_field is not None:
+            raise AccountAlreadyExistsError(conflict_field) from exc
 
-        if constraint_name == "uq_users_email":
-            raise AccountAlreadyExistsError("email") from exc
+        raise
 
-        if constraint_name == "uq_users_username":
+    return user
+
+
+async def update_user_profile(
+    db: AsyncSession,
+    user: User,
+    payload: ProfileUpdateRequest,
+) -> User:
+    if payload.username is not None and payload.username != user.username:
+        existing = await user_repository.get_by_username(db, payload.username)
+        if existing is not None and existing.id != user.id:
+            raise AccountAlreadyExistsError("username")
+
+    if payload.full_name is not None:
+        user.full_name = payload.full_name
+    if payload.username is not None:
+        user.username = payload.username
+
+    try:
+        await db.commit()
+        await db.refresh(user)
+    except IntegrityError as exc:
+        await db.rollback()
+        conflict_field = _integrity_conflict_field(exc)
+        if conflict_field == "username":
             raise AccountAlreadyExistsError("username") from exc
-
         raise
 
     return user

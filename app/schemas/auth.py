@@ -9,6 +9,7 @@ from pydantic import (
     EmailStr,
     Field,
     field_validator,
+    model_validator,
 )
 
 
@@ -65,6 +66,39 @@ class UserResponse(BaseModel):
     is_email_verified: bool
     created_at: datetime
     updated_at: datetime
+
+
+class ProfileUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=100)
+    username: str | None = Field(default=None, min_length=3, max_length=20)
+
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def normalize_full_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def normalize_username(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[a-z0-9_]{3,20}", value):
+            raise ValueError(
+                "Username must contain 3-20 lowercase letters, "
+                "numbers, or underscores"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def require_change(self) -> "ProfileUpdateRequest":
+        if self.full_name is None and self.username is None:
+            raise ValueError("At least one profile field is required")
+        return self
 
 
 class TokenResponse(BaseModel):

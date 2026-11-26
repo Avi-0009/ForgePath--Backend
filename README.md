@@ -6,7 +6,7 @@ Built with FastAPI, SQLAlchemy, PostgreSQL, Alembic, SQLite, Chroma, and LangGra
 
 ## What is implemented
 
-- Account registration, login, refresh sessions, email verification, and password reset.
+- Account registration, login, refresh sessions, profile updates, email verification, and password reset.
 - User-owned projects and immutable private source snapshots.
 - Initial codebase reviews with durable job state, leases, retry handling, and AI-usage tracking.
 - File investigation, code search, reference-integrity checks, and context-aware reports.
@@ -14,6 +14,7 @@ Built with FastAPI, SQLAlchemy, PostgreSQL, Alembic, SQLite, Chroma, and LangGra
 - Snapshot-pinned project conversations.
 - Review findings promoted into explicit tasks.
 - Task planning, patch generation, proposal approval/rejection, and verified `.diff` export.
+- Explicitly confirmed browser-local patch application with full-snapshot and file-hash validation.
 - Detection of approved patches when their exact proposed content appears in a later upload.
 - Legacy administrator-mapped local workspace APIs for planning, patching, rollback, and tests.
 - Encrypted per-user NVIDIA, OpenAI, and Hugging Face credentials.
@@ -171,7 +172,7 @@ All application endpoints are under `/api/v1`.
 
 | Area | Prefix | Notes |
 | --- | --- | --- |
-| Authentication | `/auth` | Signup, login, refresh, logout, verification, reset. |
+| Authentication | `/auth` | Signup, login, refresh, logout, profile update, verification, reset. |
 | Projects | `/projects` | User-owned lifecycle and deletion. |
 | Snapshots | `/projects/{id}/snapshot` | Bounded browser source upload and metadata. |
 | Reviews | `/projects/{id}/reviews` | Initial review jobs and results. |
@@ -197,13 +198,14 @@ Select folder
   -> approve and create plan
   -> create patch proposal
   -> approve or reject proposal
-  -> download verified .diff
-  -> apply locally outside ForgePath
-  -> upload changed snapshot
-  -> detect exact proposed content as applied
+  -> explicitly confirm local application
+  -> verify the connected folder and exact source hash
+  -> replace one existing file in the browser
+  -> upload the updated immutable snapshot
+  -> reconcile the exact proposal as applied
 ```
 
-Approval of a plan never authorizes a file edit. Browser-uploaded projects are not arbitrary server filesystem paths, and patch export never writes into the selected browser folder.
+Approval of a plan or patch never edits a file by itself. Local application requires a separate confirmation and browser write permission. Browser-uploaded projects are not arbitrary server filesystem paths, and the backend never receives a client filesystem path.
 
 ## Security boundaries
 
@@ -211,6 +213,7 @@ Approval of a plan never authorizes a file edit. Browser-uploaded projects are n
 - Snapshot paths are relative, bounded, extension-checked, and screened for sensitive filenames and credential-like content.
 - Snapshots are immutable and checksum-verified when read.
 - Plans, patches, decisions, and exports are pinned to exact snapshots and hashes.
+- Local patch application reauthorizes the approved proposal immediately before the browser write and binds the replacement upload to its expected base snapshot.
 - Duplicate paid planning/patch calls are fenced with durable tokens and timeouts.
 - Personal provider keys are encrypted with Fernet and never serialized in API responses.
 - Legacy workspace APIs require both an allowlisted root and explicit root-to-user ownership.
