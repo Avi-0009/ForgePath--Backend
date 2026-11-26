@@ -8,6 +8,7 @@ Built with FastAPI, SQLAlchemy, PostgreSQL, Alembic, SQLite, Chroma, and LangGra
 
 - Account registration, login, refresh-session rotation/revocation, profile updates, email verification, and password reset.
 - User-owned projects and immutable private source snapshots.
+- Persistent owned-project listing supports reopening prior sessions without exposing another user's projects.
 - Initial codebase reviews with durable job state, leases, retry handling, and AI-usage tracking.
 - File investigation, code search, reference-integrity checks, and context-aware reports.
 - Opt-in semantic indexing with snapshot-pinned vector namespaces.
