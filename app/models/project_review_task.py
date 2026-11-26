@@ -44,6 +44,10 @@ class ProjectReviewTask(Base):
             name="ck_project_review_tasks_planning_status",
         ),
         CheckConstraint(
+            "plan_decision IN ('pending', 'approved', 'rejected')",
+            name="ck_project_review_tasks_plan_decision",
+        ),
+        CheckConstraint(
             "patch_status IN ('not_started', 'generating', 'ready', 'approved', 'rejected', 'failed', 'applied')",
             name="ck_project_review_tasks_patch_status",
         ),
@@ -156,6 +160,14 @@ class ProjectReviewTask(Base):
     planned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+
+    plan_decision: Mapped[str | None] = mapped_column(
+        String(16), nullable=True,
+    )
+
+    plan_decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
     )
 
     patch_status: Mapped[str] = mapped_column(

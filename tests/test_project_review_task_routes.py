@@ -213,10 +213,16 @@ def test_duplicate_creation_returns_existing_task(monkeypatch):
     assert db.added == []
 
 
-def test_task_approval_is_explicit_and_keeps_existing_task_data():
+def test_task_approval_is_explicit_and_keeps_existing_task_data(monkeypatch):
+    snapshot_id = uuid4()
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id),
+    )
     task = SimpleNamespace(
         status="proposed",
         title="Review this call",
+        snapshot_id=snapshot_id,
     )
 
     db = FakeDatabase(
@@ -261,6 +267,24 @@ def test_dismissed_task_cannot_be_approved():
                 db,
             )
         )
+
+    assert exception.value.status_code == 409
+    assert db.commits == 0
+
+
+def test_repeated_finding_decision_still_revalidates_snapshot(monkeypatch):
+    task = SimpleNamespace(status="approved", snapshot_id=uuid4())
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=uuid4()),
+    )
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(decide_project_review_task(
+            uuid4(), uuid4(), ProjectReviewTaskDecision(status="approved"),
+            SimpleNamespace(id=uuid4()), db,
+        ))
 
     assert exception.value.status_code == 409
     assert db.commits == 0
@@ -557,6 +581,7 @@ def test_successful_plan_is_saved_with_fencing_token(monkeypatch):
     assert result.planning_status == "ready"
     assert result.planning_token is None
     assert result.plan["plan_id"]
+    assert result.plan_decision == "pending"
     assert result.planned_at is not None
     assert db.commits == 2
 
@@ -564,12 +589,46 @@ def test_successful_plan_is_saved_with_fencing_token(monkeypatch):
 def _planned_task(project_id, user_id, snapshot_id):
     task = _approved_task(project_id, user_id, snapshot_id)
     task.planning_status = "ready"
+    task.plan_decision = "approved"
     task.plan = {
         "plan_id": str(uuid4()),
         "objective": "Enforce project ownership before returning data.",
         "steps": [],
     }
     return task
+
+
+def test_patch_requires_approved_plan_before_ai(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id = uuid4()
+    snapshot_id = uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    task.plan_decision = "pending"
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="digest"),
+    )
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("A pending plan must not call a paid AI provider")
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.generate_snapshot_code_patch",
+        forbidden,
+    )
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(create_project_review_task_patch(
+            project_id, task.id,
+            ProjectReviewTaskPatchCreate(
+                expected_snapshot_id=snapshot_id,
+                expected_plan_id=task.plan["plan_id"],
+            ),
+            user, db,
+        ))
+
+    assert error.value.status_code == 409
+    assert db.commits == 0
 
 
 def test_patch_rejects_wrong_plan_before_ai(monkeypatch):

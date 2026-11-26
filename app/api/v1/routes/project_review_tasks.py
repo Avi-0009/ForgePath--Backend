@@ -112,6 +112,8 @@ class ProjectReviewTaskResponse(BaseModel):
     plan: TaskPlanningResponse | None
     planning_error: str | None
     planned_at: datetime | None
+    plan_decision: Literal["pending", "approved", "rejected"] | None = None
+    plan_decided_at: datetime | None = None
     patch_status: Literal[
         "not_started", "generating", "ready", "approved", "rejected", "failed",
         "applied",
@@ -159,6 +161,11 @@ async def _owned_project(
         )
 
     return project
+
+
+def _require_ready_project(project: Project) -> None:
+    if project.status != "ready":
+        raise HTTPException(409, "Project is not ready")
 
 
 @router.post(
@@ -328,7 +335,8 @@ async def create_project_review_task_plan(
 ) -> ProjectReviewTask:
     """Generate one durable plan from the task's exact private snapshot."""
 
-    await _owned_project(db, user.id, project_id)
+    project = await _owned_project(db, user.id, project_id)
+    _require_ready_project(project)
 
     try:
         manifest = await asyncio.to_thread(
@@ -459,6 +467,8 @@ async def create_project_review_task_plan(
 
     completed_task.plan = plan.model_dump(mode="json")
     completed_task.planning_status = "ready"
+    completed_task.plan_decision = "pending"
+    completed_task.plan_decided_at = None
     completed_task.planning_token = None
     completed_task.planning_started_at = None
     completed_task.planning_error = None
@@ -544,7 +554,8 @@ async def create_project_review_task_patch(
 ) -> ProjectReviewTask:
     """Generate one reviewable proposal without applying it anywhere."""
 
-    await _owned_project(db, user.id, project_id)
+    project = await _owned_project(db, user.id, project_id)
+    _require_ready_project(project)
 
     try:
         manifest = await asyncio.to_thread(
@@ -569,6 +580,8 @@ async def create_project_review_task_patch(
         raise HTTPException(404, "Task not found")
     if task.status != "approved" or task.planning_status != "ready" or not task.plan:
         raise HTTPException(409, "Create and review the implementation plan first")
+    if task.plan_decision != "approved":
+        raise HTTPException(409, "Approve the saved implementation plan before creating a patch")
     if manifest is None or (
         payload.expected_snapshot_id != task.snapshot_id
         or manifest.snapshot_id != task.snapshot_id
@@ -693,7 +706,8 @@ async def decide_project_review_task_patch(
 ) -> ProjectReviewTask:
     """Record a proposal decision; never apply snapshot files."""
 
-    await _owned_project(db, user.id, project_id)
+    project = await _owned_project(db, user.id, project_id, lock=True)
+    _require_ready_project(project)
 
     try:
         manifest = await asyncio.to_thread(
@@ -916,7 +930,8 @@ async def decide_project_review_task(
     Approving a task never authorizes patch application.
     """
 
-    await _owned_project(db, user.id, project_id)
+    project = await _owned_project(db, user.id, project_id, lock=True)
+    _require_ready_project(project)
 
     task = (
         await db.execute(
@@ -936,14 +951,19 @@ async def decide_project_review_task(
             detail="Task not found",
         )
 
+    if task.status != "proposed":
+        if task.status != payload.status:
+            raise HTTPException(409, "Task decision cannot be changed")
+
+    try:
+        manifest = await asyncio.to_thread(read_snapshot_manifest, user.id, project_id)
+    except (SnapshotConfigurationError, ValueError, OSError, KeyError):
+        raise HTTPException(503, "Project snapshot unavailable") from None
+    if manifest is None or manifest.snapshot_id != task.snapshot_id:
+        raise HTTPException(409, "This finding belongs to an older project snapshot")
+
     if task.status == payload.status:
         return task
-
-    if task.status != "proposed":
-        raise HTTPException(
-            status_code=409,
-            detail="Task decision cannot be changed",
-        )
 
     task.status = payload.status
 
