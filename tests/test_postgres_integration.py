@@ -10,10 +10,13 @@ import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
 import app.models
+from app.models.user import User
+from app.schemas.auth import ProfileUpdateRequest
+from app.services.auth import AccountAlreadyExistsError, update_user_profile
 
 
 TEST_DATABASE_URL = os.getenv("FORGEPATH_M10_TEST_DATABASE_URL")
@@ -41,7 +44,7 @@ def migrated_database():
     assert (
         url.drivername == "postgresql+asyncpg"
         and url.host in {"127.0.0.1", "localhost"}
-        and url.port == 5544
+        and url.port == 5545
         and url.database == "forgepath_m10"
         and url.username == "forgepath_test"
     ), "Refusing to migrate a non-M10 database"
@@ -307,6 +310,72 @@ async def test_postgres_rejects_duplicate_username(migrated_database):
                 await transaction.rollback()
 
     finally:
+        await engine.dispose()
+
+
+# Profile update persistence and uniqueness
+
+@pytest.mark.anyio
+async def test_postgres_profile_update_persists_and_rejects_duplicate_username(
+    migrated_database,
+):
+    """Profile updates survive a new session and preserve unique usernames."""
+
+    engine = create_async_engine(migrated_database)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    profile_user = _user_values(prefix="profile")
+    other_user = _user_values(prefix="other")
+    updated_username = f"updated_{uuid4().hex[:8]}"
+
+    try:
+        async with engine.begin() as connection:
+            await _insert_user(connection, profile_user)
+            await _insert_user(connection, other_user)
+
+        async with session_factory() as session:
+            current_user = await session.get(User, profile_user["id"])
+            assert current_user is not None
+            updated = await update_user_profile(
+                session,
+                current_user,
+                ProfileUpdateRequest(
+                    full_name="  Persisted Profile Name  ",
+                    username=updated_username.upper(),
+                ),
+            )
+            assert updated.full_name == "Persisted Profile Name"
+            assert updated.username == updated_username
+            assert updated.email == profile_user["email"]
+
+        async with session_factory() as session:
+            persisted = await session.get(User, profile_user["id"])
+            assert persisted is not None
+            assert persisted.full_name == "Persisted Profile Name"
+            assert persisted.username == updated_username
+            assert persisted.email == profile_user["email"]
+
+            with pytest.raises(AccountAlreadyExistsError) as exception:
+                await update_user_profile(
+                    session,
+                    persisted,
+                    ProfileUpdateRequest(username=other_user["username"]),
+                )
+            assert exception.value.field == "username"
+
+        async with session_factory() as session:
+            unchanged = await session.get(User, profile_user["id"])
+            assert unchanged is not None
+            assert unchanged.username == updated_username
+            assert unchanged.email == profile_user["email"]
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM users WHERE id IN (:profile_id, :other_id)"),
+                {
+                    "profile_id": profile_user["id"],
+                    "other_id": other_user["id"],
+                },
+            )
         await engine.dispose()
 
 

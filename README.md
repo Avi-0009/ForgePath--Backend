@@ -240,6 +240,17 @@ Run the complete suite when the test environment is configured:
 python -B -m pytest -q
 ```
 
+Profile persistence also has an opt-in PostgreSQL integration test. It requires the dedicated disposable database identity enforced by `tests/test_postgres_integration.py`; the test refuses any other host, port, database, or user and applies migrations only to that test database. Port `5545` is reserved for this fixture so it does not overlap the existing M10 development container on port `5544`.
+
+```powershell
+docker run --name forgepath-profile-test-db --rm -d -p 127.0.0.1:5545:5432 -e POSTGRES_DB=forgepath_m10 -e POSTGRES_USER=forgepath_test -e POSTGRES_PASSWORD=forgepath_test postgres:16-alpine
+docker exec forgepath-profile-test-db pg_isready -U forgepath_test -d forgepath_m10
+$env:FORGEPATH_M10_TEST_DATABASE_URL = "postgresql+asyncpg://forgepath_test:forgepath_test@127.0.0.1:5545/forgepath_m10"
+python -B -m pytest -q -p no:cacheprovider tests/test_postgres_integration.py -k profile_update
+Remove-Item Env:FORGEPATH_M10_TEST_DATABASE_URL
+docker stop forgepath-profile-test-db
+```
+
 Read-only migration checks:
 
 ```powershell

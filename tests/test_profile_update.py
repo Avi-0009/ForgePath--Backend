@@ -58,6 +58,7 @@ def test_profile_payload_normalizes_name_and_username():
         {"full_name": "   "},
         {"username": "invalid-name"},
         {"username": "ab"},
+        {"email": "changed@example.com"},
     ],
 )
 def test_profile_payload_rejects_empty_or_invalid_changes(payload):
