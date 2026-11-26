@@ -14,6 +14,7 @@ from app.api.v1.routes.project_review_tasks import (
     ProjectReviewTaskDecision,
     ProjectReviewTaskPlanCreate,
     ProjectReviewTaskPatchCreate,
+    ProjectReviewTaskPatchApplicationRequest,
     ProjectReviewTaskPatchDecision,
     create_project_review_task,
     create_project_review_task_plan,
@@ -22,6 +23,7 @@ from app.api.v1.routes.project_review_tasks import (
     decide_project_review_task,
     download_project_review_task_patch,
     list_project_review_tasks,
+    prepare_project_review_task_patch_application,
 )
 
 
@@ -852,6 +854,143 @@ def test_approved_patch_download_revalidates_and_rebuilds_diff(monkeypatch):
     assert "corrupted stored diff" not in body
     assert "-    return project" in body
     assert "+    return owned_project" in body
+
+
+def test_prepare_patch_application_returns_only_revalidated_exact_content(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id, snapshot_id = uuid4(), uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    original = "def route():\n    return project\n"
+    proposed = "def route():\n    return owned_project\n"
+    original_hash = hashlib.sha256(original.encode()).hexdigest()
+    proposed_hash = hashlib.sha256(proposed.encode()).hexdigest()
+    task.patch_status = "approved"
+    task.patch = {
+        "relative_path": task.path,
+        "original_sha256": original_hash,
+        "proposed_sha256": proposed_hash,
+        "proposed_code": proposed,
+    }
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=snapshot_id, sha256="b" * 64),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_sources",
+        lambda *_: [(task.path, original)],
+    )
+
+    response = Response()
+    result = asyncio.run(prepare_project_review_task_patch_application(
+        project_id,
+        task.id,
+        ProjectReviewTaskPatchApplicationRequest(
+            expected_snapshot_id=snapshot_id,
+            expected_proposed_sha256=proposed_hash,
+        ),
+        response,
+        user,
+        db,
+    ))
+
+    assert result.snapshot_sha256 == "b" * 64
+    assert result.relative_path == task.path
+    assert result.original_sha256 == original_hash
+    assert result.proposed_sha256 == proposed_hash
+    assert result.proposed_code == proposed
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "projects.user_id" in db.queries[0]
+    assert "project_review_tasks.user_id" in db.queries[1]
+    assert db.commits == 0
+
+
+def test_prepare_patch_application_hides_foreign_task():
+    user = SimpleNamespace(id=uuid4())
+    snapshot_id = uuid4()
+    db = FakeDatabase(SimpleNamespace(status="ready"), None)
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(prepare_project_review_task_patch_application(
+            uuid4(),
+            uuid4(),
+            ProjectReviewTaskPatchApplicationRequest(
+                expected_snapshot_id=snapshot_id,
+                expected_proposed_sha256="a" * 64,
+            ),
+            Response(),
+            user,
+            db,
+        ))
+
+    assert exception.value.status_code == 404
+
+
+def test_prepare_patch_application_rejects_stale_snapshot_before_content_read(monkeypatch):
+    user = SimpleNamespace(id=uuid4())
+    project_id, snapshot_id = uuid4(), uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    task.patch_status = "approved"
+    task.patch = {
+        "relative_path": task.path,
+        "original_sha256": "a" * 64,
+        "proposed_sha256": "b" * 64,
+        "proposed_code": "changed",
+    }
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=uuid4(), sha256="c" * 64),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.routes.project_review_tasks.read_snapshot_sources",
+        lambda *_: (_ for _ in ()).throw(AssertionError("stale source must not be used")),
+    )
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(prepare_project_review_task_patch_application(
+            project_id,
+            task.id,
+            ProjectReviewTaskPatchApplicationRequest(
+                expected_snapshot_id=snapshot_id,
+                expected_proposed_sha256="b" * 64,
+            ),
+            Response(),
+            user,
+            db,
+        ))
+
+    assert exception.value.status_code == 409
+
+
+def test_prepare_patch_application_rejects_duplicate_after_application():
+    user = SimpleNamespace(id=uuid4())
+    project_id, snapshot_id = uuid4(), uuid4()
+    task = _planned_task(project_id, user.id, snapshot_id)
+    task.patch_status = "applied"
+    task.patch = {
+        "relative_path": task.path,
+        "original_sha256": "a" * 64,
+        "proposed_sha256": "b" * 64,
+        "proposed_code": "changed",
+    }
+    db = FakeDatabase(SimpleNamespace(status="ready"), task)
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(prepare_project_review_task_patch_application(
+            project_id,
+            task.id,
+            ProjectReviewTaskPatchApplicationRequest(
+                expected_snapshot_id=snapshot_id,
+                expected_proposed_sha256="b" * 64,
+            ),
+            Response(),
+            user,
+            db,
+        ))
+
+    assert exception.value.status_code == 409
 
 
 def test_unapproved_patch_cannot_be_downloaded(monkeypatch):

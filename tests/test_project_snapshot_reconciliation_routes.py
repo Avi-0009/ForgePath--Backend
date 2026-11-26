@@ -6,6 +6,9 @@ import json
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+from fastapi import HTTPException
+
 from app.api.v1.routes import project_snapshots as routes
 
 
@@ -36,8 +39,10 @@ class Database:
 
 
 class Request:
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, expected_snapshot_id=None):
         self.headers = {"content-length": str(len(body))}
+        if expected_snapshot_id is not None:
+            self.headers["x-forgepath-expected-snapshot-id"] = str(expected_snapshot_id)
         self.app = SimpleNamespace(state=SimpleNamespace(workspace_indexing_service=None))
         self._body = body
 
@@ -87,7 +92,39 @@ def test_upload_marks_exact_approved_patch_as_applied(monkeypatch):
     )
 
     assert response["applied_patch_count"] == 1
+    assert response["applied_patch_task_ids"] == [str(task_id)]
     assert task.patch_status == "applied"
     assert task.applied_snapshot_id == snapshot_id
     assert task.applied_at is not None
     assert db.commits == 1
+
+
+def test_upload_rejects_changed_expected_base_snapshot(monkeypatch):
+    user_id, project_id, expected_snapshot_id = (uuid4() for _ in range(3))
+    project = SimpleNamespace(id=project_id, status="ready")
+    db = Database(project, [])
+    body = json.dumps({
+        "files": [{"relative_path": "app/main.py", "content": "print('changed')\n"}],
+        "asset_paths": [],
+    }).encode("utf-8")
+    monkeypatch.setattr(
+        routes,
+        "read_snapshot_manifest",
+        lambda *_: SimpleNamespace(snapshot_id=uuid4()),
+    )
+    monkeypatch.setattr(
+        routes,
+        "store_snapshot",
+        lambda *_: (_ for _ in ()).throw(AssertionError("stale upload must not be stored")),
+    )
+
+    with pytest.raises(HTTPException) as exception:
+        asyncio.run(routes.upload_project_snapshot(
+            project_id,
+            Request(body, expected_snapshot_id),
+            SimpleNamespace(id=user_id),
+            db,
+        ))
+
+    assert exception.value.status_code == 409
+    assert db.commits == 0

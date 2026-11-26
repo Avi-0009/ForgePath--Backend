@@ -37,6 +37,7 @@ from app.models.user import User
 from app.services.project_review_tasks import get_task_finding
 from app.services.project_snapshots import (
     SnapshotConfigurationError,
+    SnapshotManifest,
     SnapshotValidationError,
     read_snapshot_manifest,
     read_snapshot_sources,
@@ -92,6 +93,24 @@ class ProjectReviewTaskPatchDecision(BaseModel):
     status: Literal["approved", "rejected"]
     expected_snapshot_id: UUID
     expected_proposed_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ProjectReviewTaskPatchApplicationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_snapshot_id: UUID
+    expected_proposed_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ProjectReviewTaskPatchApplicationResponse(BaseModel):
+    project_id: UUID
+    task_id: UUID
+    snapshot_id: UUID
+    snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    relative_path: str
+    original_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    proposed_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    proposed_code: str
 
 
 class ProjectReviewTaskResponse(BaseModel):
@@ -766,26 +785,42 @@ async def decide_project_review_task_patch(
     return task
 
 
-async def _build_verified_patch_export(
+async def _verified_approved_patch(
     user_id: UUID,
     project_id: UUID,
     task: ProjectReviewTask,
-) -> str:
+) -> tuple[SnapshotManifest, str, str, str, str]:
     if task.patch_status != "approved" or not isinstance(task.patch, dict):
-        raise HTTPException(409, "Approve the patch proposal before exporting it")
+        raise HTTPException(409, "Approve the patch proposal before using it")
 
     try:
         manifest = await asyncio.to_thread(
             read_snapshot_manifest, user_id, project_id,
         )
-        sources = await asyncio.to_thread(
-            read_snapshot_sources, user_id, project_id, task.snapshot_id,
-        )
-    except (SnapshotConfigurationError, SnapshotValidationError):
+    except (
+        KeyError,
+        OSError,
+        SnapshotConfigurationError,
+        SnapshotValidationError,
+        ValueError,
+    ):
         raise HTTPException(409, "Project snapshot is no longer valid") from None
 
     if manifest is None or manifest.snapshot_id != task.snapshot_id:
         raise HTTPException(409, "The approved proposal belongs to an older snapshot")
+
+    try:
+        sources = await asyncio.to_thread(
+            read_snapshot_sources, user_id, project_id, task.snapshot_id,
+        )
+    except (
+        KeyError,
+        OSError,
+        SnapshotConfigurationError,
+        SnapshotValidationError,
+        ValueError,
+    ):
+        raise HTTPException(409, "Project snapshot is no longer valid") from None
 
     source_content = dict(sources).get(task.path)
     proposed_code = task.patch.get("proposed_code")
@@ -803,6 +838,27 @@ async def _build_verified_patch_export(
     ):
         raise HTTPException(409, "The approved proposal failed its integrity check")
 
+    if source_content == proposed_code:
+        raise HTTPException(409, "The approved proposal contains no changes")
+
+    return (
+        manifest,
+        source_content,
+        proposed_code,
+        proposed_sha256,
+        task.patch["original_sha256"],
+    )
+
+
+async def _build_verified_patch_export(
+    user_id: UUID,
+    project_id: UUID,
+    task: ProjectReviewTask,
+) -> str:
+    _, source_content, proposed_code, _, _ = await _verified_approved_patch(
+        user_id, project_id, task,
+    )
+
     diff = "".join(
         difflib.unified_diff(
             source_content.splitlines(keepends=True),
@@ -815,6 +871,57 @@ async def _build_verified_patch_export(
         raise HTTPException(409, "The approved proposal contains no changes")
 
     return diff
+
+
+@router.post(
+    "/{project_id}/tasks/{task_id}/patch/application",
+    response_model=ProjectReviewTaskPatchApplicationResponse,
+)
+async def prepare_project_review_task_patch_application(
+    project_id: UUID,
+    task_id: UUID,
+    payload: ProjectReviewTaskPatchApplicationRequest,
+    response: Response,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProjectReviewTaskPatchApplicationResponse:
+    """Authorize an exact browser-local write without accessing server paths."""
+
+    project = await _owned_project(db, user.id, project_id)
+    _require_ready_project(project)
+    task = (
+        await db.execute(
+            select(ProjectReviewTask).where(
+                ProjectReviewTask.id == task_id,
+                ProjectReviewTask.project_id == project_id,
+                ProjectReviewTask.user_id == user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if (
+        payload.expected_snapshot_id != task.snapshot_id
+        or not isinstance(task.patch, dict)
+        or payload.expected_proposed_sha256 != task.patch.get("proposed_sha256")
+    ):
+        raise HTTPException(409, "The snapshot or patch proposal changed. Refresh this task")
+
+    manifest, _, proposed_code, proposed_sha256, original_sha256 = (
+        await _verified_approved_patch(user.id, project_id, task)
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return ProjectReviewTaskPatchApplicationResponse(
+        project_id=project_id,
+        task_id=task.id,
+        snapshot_id=task.snapshot_id,
+        snapshot_sha256=manifest.sha256,
+        relative_path=task.path,
+        original_sha256=original_sha256,
+        proposed_sha256=proposed_sha256,
+        proposed_code=proposed_code,
+    )
 
 
 @router.get("/{project_id}/tasks/{task_id}/patch/download")

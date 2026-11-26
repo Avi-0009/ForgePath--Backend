@@ -148,6 +148,7 @@ app.add_middleware(
         "Authorization",
         "Content-Type",
         "Accept",
+        "X-ForgePath-Expected-Snapshot-Id",
     ],
 )
 

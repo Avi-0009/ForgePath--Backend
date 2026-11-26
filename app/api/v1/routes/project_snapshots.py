@@ -69,6 +69,22 @@ async def upload_project_snapshot(
     async with index_lifecycle_lock:
         try:
             payload = SourceSnapshot.model_validate_json(body)
+            expected_snapshot = request.headers.get(
+                "x-forgepath-expected-snapshot-id"
+            )
+            if expected_snapshot:
+                try:
+                    expected_snapshot_id = UUID(expected_snapshot)
+                except ValueError:
+                    raise HTTPException(400, "Invalid expected snapshot identifier") from None
+                current = await asyncio.to_thread(
+                    read_snapshot_manifest, user.id, project_id,
+                )
+                if current is None or current.snapshot_id != expected_snapshot_id:
+                    raise HTTPException(
+                        409,
+                        "The project snapshot changed before this update was uploaded",
+                    )
             manifest = await asyncio.to_thread(store_snapshot, user.id, project_id, payload)
         except (ValidationError, SnapshotValidationError, UnicodeError):
             raise HTTPException(422, "Source snapshot contains invalid or prohibited files") from None
@@ -136,6 +152,9 @@ async def upload_project_snapshot(
         "status": "ready",
         "index_cleanup_pending": cleanup_pending,
         "applied_patch_count": len(applied_ids),
+        "applied_patch_task_ids": [
+            str(task_id) for task_id in sorted(applied_ids, key=str)
+        ],
     }
 
 
