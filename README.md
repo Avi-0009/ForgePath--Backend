@@ -74,22 +74,17 @@ python -B -m pip install --upgrade pip
 python -B -m pip install -r requirements.txt
 ```
 
-### 2. Start PostgreSQL
+### 2. Configure the environment
 
-```powershell
-docker compose up -d db
-```
-
-The default database is exposed on `localhost:5433`. To use another server, set `DATABASE_URL` accordingly.
-
-> The Compose `backend` service does not currently forward every required mail, reset, encryption, and snapshot variable. For local development, start PostgreSQL with Compose and run FastAPI from the activated environment.
-
-### 3. Configure the environment
-
-Copy `.env.example` to `.env`, replace its placeholders, and add the required application settings below. Never commit `.env`.
+Create `.env`, replace every placeholder, and never commit it. The same file is
+used by local Python commands and by Docker Compose.
 
 ```dotenv
-DATABASE_URL=postgresql+asyncpg://forgepath_user:change_me@localhost:5433/forgepath
+POSTGRES_DB=forgepath
+POSTGRES_USER=forgepath_user
+POSTGRES_PASSWORD=<strong-random-url-safe-password>
+
+DATABASE_URL=postgresql+asyncpg://forgepath_user:<same-password>@localhost:5433/forgepath
 
 JWT_SECRET_KEY=<at-least-32-random-characters>
 PASSWORD_RESET_SECRET_KEY=<independent-random-secret>
@@ -98,37 +93,78 @@ BREVO_API_KEY=<brevo-api-key>
 BREVO_SENDER_EMAIL=<verified-sender@example.com>
 BREVO_SENDER_NAME=ForgePath
 
-CORS_ORIGINS=http://localhost:5173
+CORS_ORIGINS=https://localhost:5173
+TRUSTED_HOSTS=localhost,127.0.0.1,backend
 REFRESH_COOKIE_SECURE=false
 
-PROJECT_SNAPSHOT_DIRECTORY=<absolute-private-directory>
+PROJECT_SNAPSHOT_DIRECTORY=<absolute-private-directory-for-local-python>
 AI_CREDENTIALS_ENCRYPTION_KEY=<fernet-key>
 ```
 
-Generate secrets locally:
+Use `REFRESH_COOKIE_SECURE=false` only for the loopback HTTP Docker frontend.
+Keep it `true` behind production HTTPS. Compose replaces `DATABASE_URL`, snapshot
+storage, conversation storage, and the XDG data directory with container-private
+values; local Python continues using the values above.
+
+Generate independent secrets locally:
 
 ```powershell
 python -B -c "import secrets; print(secrets.token_urlsafe(48))"
 python -B -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Use separate values for JWT signing, password-reset signing, and Fernet encryption. `REFRESH_COOKIE_SECURE=false` is only appropriate for trusted local HTTP development.
+### 3. Start with Docker Compose
 
-### 4. Apply migrations
+Validate interpolation before creating containers:
 
 ```powershell
+docker compose config --quiet
+```
+
+Start PostgreSQL, apply Alembic explicitly, and then start the application:
+
+```powershell
+docker compose build backend frontend
+docker compose up -d db
+docker compose run --rm migrate
+docker compose up -d
+docker compose ps
+```
+
+Compose never applies migrations during backend startup. PostgreSQL, FastAPI, and
+the frontend bind to `127.0.0.1` by default. The frontend is available at
+`http://127.0.0.1:5173`; it proxies `/api` internally to FastAPI. Private snapshots,
+conversation history, semantic vectors, and job receipts persist in the
+`forgepath_private_data` volume.
+
+pgAdmin is optional and does not start normally. Set a strong `PGADMIN_PASSWORD`
+in `.env`, then start it only when needed:
+
+```powershell
+docker compose --profile tools up -d pgadmin
+```
+
+Stop the stack without deleting its named volumes:
+
+```powershell
+docker compose down
+```
+
+### 4. Local Python development
+
+To run FastAPI outside Docker, start only PostgreSQL and use the activated Python
+environment:
+
+```powershell
+docker compose up -d db
 python -B -m alembic heads
 python -B -m alembic upgrade head
 python -B -m alembic current
-```
-
-There should be exactly one Alembic head. Apply migrations before starting code that depends on a new schema revision.
-
-### 5. Start FastAPI
-
-```powershell
 python -B -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+There should be exactly one Alembic head. Apply migrations before starting code
+that depends on a new schema revision.
 
 - API root: `http://127.0.0.1:8000/`
 - OpenAPI UI: `http://127.0.0.1:8000/docs`
@@ -146,6 +182,7 @@ python -B -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 | `REFRESH_TOKEN_EXPIRE_DAYS` | No | Refresh-token lifetime; default `7`. |
 | `REFRESH_COOKIE_SECURE` | No | Require HTTPS refresh cookies; defaults to `true`. |
 | `CORS_ORIGINS` | No | Comma-separated allowed frontend origins. |
+| `TRUSTED_HOSTS` | No | Comma-separated HTTP Host allowlist. Configure the public API hostname in production. |
 | `BREVO_API_KEY` | Yes | Transactional email credential. |
 | `BREVO_SENDER_EMAIL` | Yes | Verified sender address. |
 | `BREVO_SENDER_NAME` | No | Sender display name. |
@@ -305,7 +342,8 @@ Tasks are pinned to their source snapshot. Create new work from the current revi
 
 - Back up PostgreSQL and any enabled snapshot, SQLite, and Chroma storage.
 - Apply migrations once per deployment before starting the new revision.
-- Use a reverse proxy with HTTPS, request-size limits, and security headers.
+- The included frontend nginx container supplies SPA fallback, bounded uploads, long API timeouts, and baseline security headers. Terminate production TLS at a trusted reverse proxy and keep refresh cookies secure.
+- Compose services bind to loopback by default. Set an explicit bind address only behind a firewall or reverse proxy.
 - Coordinate local Chroma access; multi-worker indexing needs a durable distributed lock/job queue.
 
 ## Related repository

@@ -1,4 +1,5 @@
 """Focused safety checks for browser-supplied codebase snapshots."""
+import os
 from uuid import uuid4
 
 import pytest
@@ -48,6 +49,21 @@ def test_isolates_snapshots_by_user_and_project(tmp_path, monkeypatch):
     assert read_snapshot_manifest(user_b, project_a) is None
     assert read_snapshot_manifest(user_a, project_b) is None
     assert not (tmp_path / "snapshots" / str(user_b) / str(project_a)).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission hardening")
+def test_hardens_existing_snapshot_directory_permissions(tmp_path, monkeypatch):
+    snapshot_directory = tmp_path / "snapshots"
+    snapshot_directory.mkdir(mode=0o755)
+    snapshot_directory.chmod(0o755)
+    monkeypatch.setattr(
+        settings,
+        "project_snapshot_directory",
+        str(snapshot_directory),
+    )
+
+    assert read_snapshot_manifest(uuid4(), uuid4()) is None
+    assert snapshot_directory.stat().st_mode & 0o077 == 0
 
 
 def test_snapshot_checksum_uses_identical_order_for_nested_and_mixed_case_paths(

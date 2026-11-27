@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     jwt_algorithm: Literal["HS256"] = "HS256"
     access_token_expire_minutes: int = 30
     cors_origins: str = "http://localhost:5173"
+    trusted_hosts: str = "localhost,127.0.0.1,testserver,backend"
 
     # Workspace embedding configuration
     embedding_provider: Literal["openai"] | None = None
@@ -77,6 +78,17 @@ class Settings(BaseSettings):
             for origin in self.cors_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        hosts = [
+            host.strip()
+            for host in self.trusted_hosts.split(",")
+            if host.strip()
+        ]
+        if not hosts:
+            raise ValueError("TRUSTED_HOSTS must contain at least one host")
+        return hosts
 
     model_config = SettingsConfigDict(
         env_file=".env",

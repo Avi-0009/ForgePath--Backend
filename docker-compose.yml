@@ -6,9 +6,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-forgepath}
       POSTGRES_USER: ${POSTGRES_USER:-forgepath_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,38 +20,129 @@ services:
       retries: 10
 
   backend:
+    image: forgepath-backend:local
     build:
       context: .
       dockerfile: Dockerfile
     container_name: forgepath-backend
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forgepath_user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-forgepath}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
-      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forgepath_user}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-forgepath}
+      PROJECT_SNAPSHOT_DIRECTORY: /var/lib/forgepath/snapshots
+      FORGEPATH_CONVERSATION_DB: /var/lib/forgepath/conversations/conversations.sqlite3
+      XDG_DATA_HOME: /var/lib/forgepath
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1,backend}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - forgepath_private_data:/var/lib/forgepath
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import pathlib, urllib.request; p = pathlib.Path('/var/lib/forgepath/snapshots'); assert p.is_dir() and not (p.stat().st_mode & 0o077); urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  migrate:
+    image: forgepath-backend:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles:
+      - tools
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forgepath_user}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-forgepath}
+      PROJECT_SNAPSHOT_DIRECTORY: /var/lib/forgepath/snapshots
+      FORGEPATH_CONVERSATION_DB: /var/lib/forgepath/conversations/conversations.sqlite3
+      XDG_DATA_HOME: /var/lib/forgepath
+    command:
+      - python
+      - -B
+      - -m
+      - alembic
+      - upgrade
+      - head
+    volumes:
+      - forgepath_private_data:/var/lib/forgepath
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    image: forgepath-frontend:local
+    build:
+      context: ../ForgePath--Frontend
+      dockerfile: Dockerfile
+    container_name: forgepath-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --tries=1
+        - --spider
+        - http://127.0.0.1:8080/healthz
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: forgepath-pgadmin
     restart: unless-stopped
+    profiles:
+      - tools
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@forgepath.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-}
       PGADMIN_CONFIG_SERVER_MODE: "False"
     volumes:
       - ./pgadmin-servers.json:/pgadmin4/servers.json:ro
     ports:
-      - "${PGADMIN_PORT:-5050}:80"
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   postgres_data:
+  forgepath_private_data:

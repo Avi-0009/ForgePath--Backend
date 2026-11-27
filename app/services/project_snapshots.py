@@ -201,7 +201,14 @@ def _storage_root() -> Path:
         if resolved != path.absolute() or not resolved.is_dir():
             raise SnapshotConfigurationError("Unsafe snapshot storage root")
         if os.name != "nt" and (resolved.stat().st_mode & 0o077):
-            raise SnapshotConfigurationError("Snapshot storage must not be accessible by group or others")
+            # Named Docker volumes can preserve permissions from an older
+            # image. Tightening an owned storage directory is safe and keeps
+            # an otherwise valid private volume usable after an upgrade.
+            resolved.chmod(0o700)
+            if resolved.stat().st_mode & 0o077:
+                raise SnapshotConfigurationError(
+                    "Snapshot storage must not be accessible by group or others"
+                )
         return resolved
     except OSError as exc:
         raise SnapshotConfigurationError("Snapshot storage is unavailable") from exc
