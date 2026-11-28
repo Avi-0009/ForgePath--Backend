@@ -56,10 +56,16 @@ def test_missing_docker_fails_closed(workspace, monkeypatch):
         runner.execute_tests(workspace_root=workspace, runner="pytest")
 
 
-def test_npm_not_executed_without_configured_sandbox(workspace):
-    (workspace / "package.json").write_text('{"scripts":{"test":"echo hello"}}')
-    with pytest.raises(runner.TestExecutionError, match="not yet configured"):
-        runner.execute_tests(workspace_root=workspace, runner="npm")
+def test_unsupported_sandbox_runner_fails_closed(workspace):
+    with pytest.raises(
+        sandbox.SandboxError,
+        match="not yet configured",
+    ):
+        sandbox.run_in_sandbox(
+            workspace_root=workspace,
+            runner="unsupported",
+            timeout_seconds=30,
+        )
 
 
 def test_no_host_command_fallback(workspace, monkeypatch):
@@ -687,3 +693,198 @@ def test_snapshot_excludes_directory_symlink(workspace, tmp_path):
 
     assert not (destination / "linked_directory").exists()
     assert not (destination / "linked_directory" / "secret.py").exists()
+
+
+
+def test_npm_sandbox_unavailable_fails_closed(
+    workspace,
+    monkeypatch,
+):
+    (workspace / "package.json").write_text(
+        '{"scripts":{"test":"node --test"}}',
+        encoding="utf-8",
+    )
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(
+        sandbox.subprocess,
+        "Popen",
+        missing,
+    )
+
+    with pytest.raises(
+        runner.TestExecutionError,
+        match="Docker is unavailable",
+    ):
+        runner.execute_tests(
+            workspace_root=workspace,
+            runner="npm",
+        )
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Real Docker tests require explicit opt-in",
+)
+def test_real_npm_docker_sandbox(workspace):
+    (workspace / "package.json").write_text(
+        '{"scripts":{"test":"node --test"}}',
+        encoding="utf-8",
+    )
+
+    source = """
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+
+test("sandbox security boundaries", () => {
+    assert.equal(process.getuid(), 65534);
+    assert.equal(fs.existsSync("/work/.env"), false);
+    assert.equal(process.env.JWT_SECRET_KEY, undefined);
+    assert.equal(process.env.DATABASE_URL, undefined);
+
+    fs.writeFileSync("/work/generated.txt", "sandbox only");
+    assert.equal(
+        fs.existsSync("/work/generated.txt"),
+        true
+    );
+});
+"""
+
+    (workspace / "example.test.js").write_text(
+        source,
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="npm",
+        timeout_seconds=60,
+    )
+
+    assert result.status == "passed", result.stderr
+    assert result.exit_code == 0
+    assert result.runner == "npm"
+    assert result.command == ["npm", "test"]
+
+    assert not (workspace / "generated.txt").exists()
+
+    assert (
+        workspace / "example.test.js"
+    ).read_text(encoding="utf-8") == source
+
+    assert (workspace / ".env").read_text() == (
+        "SECRET=never-copy\n"
+    )
+
+
+
+def test_go_sandbox_unavailable_fails_closed(
+    workspace,
+    monkeypatch,
+):
+    (workspace / "go.mod").write_text(
+        "module example.com/test\n\ngo 1.23\n",
+        encoding="utf-8",
+    )
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(
+        sandbox.subprocess,
+        "Popen",
+        missing,
+    )
+
+    with pytest.raises(
+        runner.TestExecutionError,
+        match="Docker is unavailable",
+    ):
+        runner.execute_tests(
+            workspace_root=workspace,
+            runner="go",
+        )
+
+
+@pytest.mark.skipif(
+    os.getenv("FORGEPATH_DOCKER_TESTS") != "1",
+    reason="Real Docker tests require explicit opt-in",
+)
+def test_real_go_docker_sandbox(workspace):
+    (workspace / "go.mod").write_text(
+        "module example.com/test\n\ngo 1.23\n",
+        encoding="utf-8",
+    )
+
+    source = """
+package example
+
+import (
+    "os"
+    "testing"
+)
+
+func TestSandboxSecurity(t *testing.T) {
+    if os.Getuid() != 65534 {
+        t.Fatal("Sandbox must use an unprivileged user")
+    }
+
+    if _, err := os.Stat("/work/.env"); !os.IsNotExist(err) {
+        t.Fatal("Sensitive file must not be available")
+    }
+
+    if _, exists := os.LookupEnv("DATABASE_URL"); exists {
+        t.Fatal("Database credentials must not be exposed")
+    }
+
+    if _, exists := os.LookupEnv("JWT_SECRET_KEY"); exists {
+        t.Fatal("Backend secrets must not be exposed")
+    }
+
+    if os.Getenv("GOPROXY") != "off" {
+        t.Fatal("Dependency downloads must be disabled")
+    }
+
+    err := os.WriteFile(
+        "/work/generated.txt",
+        []byte("sandbox only"),
+        0600,
+    )
+
+    if err != nil {
+        t.Fatal(err)
+    }
+}
+"""
+
+    (workspace / "example_test.go").write_text(
+        source,
+        encoding="utf-8",
+    )
+
+    result = runner.execute_tests(
+        workspace_root=workspace,
+        runner="go",
+        timeout_seconds=180,
+    )
+
+    assert result.status == "passed", (
+        result.stdout + "\n" + result.stderr
+    )
+
+    assert result.exit_code == 0
+    assert result.runner == "go"
+    assert result.command == ["go", "test", "./..."]
+
+    assert not (workspace / "generated.txt").exists()
+
+    assert (
+        workspace / "example_test.go"
+    ).read_text(encoding="utf-8") == source
+
+    assert (workspace / ".env").read_text() == (
+        "SECRET=never-copy\n"
+    )

@@ -22,6 +22,7 @@ from app.api.v1.routes.project_references import router as project_references_ro
 from app.api.v1.routes.project_context_investigation import router as project_context_investigation_router
 from app.api.v1.routes.project_conversations import router as project_conversations_router
 from app.api.v1.routes.project_workflows import router as project_workflows_router
+from app.api.v1.routes.project_execution import router as project_execution_router
 
 
 router = APIRouter(prefix="/api/v1")
@@ -45,3 +46,4 @@ router.include_router(project_references_router)
 router.include_router(project_context_investigation_router)
 router.include_router(project_conversations_router)
 router.include_router(project_workflows_router)
+router.include_router(project_execution_router)

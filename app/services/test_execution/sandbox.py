@@ -25,7 +25,23 @@ from app.services.workspace import (
 MAX_SNAPSHOT_FILES = 1000
 MAX_SNAPSHOT_BYTES = 20 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
+
 DOCKER_IMAGE = "forgepath-pytest-sandbox:dev"
+
+SANDBOX_RUNNERS = {
+    "pytest": (
+        DOCKER_IMAGE,
+        "python -m pytest -q -p no:cacheprovider",
+    ),
+    "npm": (
+        "forgepath-npm-sandbox:dev",
+        "npm test",
+    ),
+    "go": (
+        "forgepath-go-sandbox:dev",
+        "mkdir -p /work/.go-tmp && go test ./...",
+    ),
+}
 
 
 class SandboxError(Exception):
@@ -51,6 +67,7 @@ class _Capture:
         try:
             while True:
                 chunk = stream.read(8192)
+
                 if not chunk:
                     break
 
@@ -210,153 +227,173 @@ def run_in_sandbox(
     runner: str,
     timeout_seconds: int,
 ) -> SandboxResult:
-    """Run a fixed pytest command in a disposable network-disabled container.
-
-    npm/go intentionally fail closed until their runtime images and
-    dependency provisioning are reviewed.
-
-    No user-controlled executable or Docker options are accepted.
-    """
-    if runner != "pytest":
+    """Copy a legacy allowlisted workspace and execute inside the sandbox."""
+    if runner not in SANDBOX_RUNNERS:
         raise SandboxError(
             f"Sandboxed {runner} execution is not yet configured."
         )
 
-    name = f"forgepath-test-{uuid4().hex}"
-
-    with tempfile.TemporaryDirectory(
-        prefix="forgepath-snapshot-"
-    ) as tmp:
+    with tempfile.TemporaryDirectory(prefix="forgepath-snapshot-") as tmp:
         snapshot = Path(tmp) / "src"
         snapshot.mkdir()
-
         _snapshot(workspace_root, snapshot)
+        return _run_prepared_snapshot(
+            snapshot=snapshot, runner=runner, timeout_seconds=timeout_seconds,
+        )
 
-        command = [
-            "docker",
-            "run",
-            "--rm",
-            "--name",
-            name,
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "64",
-            "--memory",
-            "512m",
-            "--cpus",
-            "1",
-            "--memory-swap",
-            "512m",
-            "--ulimit",
-            "nofile=256:256",
-            "--init",
-            "--user",
-            "65534:65534",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=64m,mode=1777",
-            "--tmpfs",
-            "/work:rw,nosuid,size=128m,mode=1777",
-            "--mount",
-            (
-                f"type=bind,source={snapshot.resolve()},"
-                "target=/source,readonly"
-            ),
-            "--workdir",
-            "/work",
-            "--env",
-            "CI=true",
-            "--env",
-            "PYTHONDONTWRITEBYTECODE=1",
-            "--env",
-            "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
-            DOCKER_IMAGE,
-            "/bin/sh",
-            "-c",
-            (
-                "cp -R /source/. /work/ && "
-                "python -m pytest -q -p no:cacheprovider"
-            ),
-        ]
+
+def _run_prepared_snapshot(
+    *,
+    snapshot: Path,
+    runner: str,
+    timeout_seconds: int,
+) -> SandboxResult:
+    """Execute a private, server-prepared source copy, never a client path."""
+    if not 1 <= timeout_seconds <= 600:
+        raise ValueError("timeout_seconds must be between 1 and 600.")
+    configuration = SANDBOX_RUNNERS.get(runner)
+
+    if configuration is None:
+        raise SandboxError(
+            f"Sandboxed {runner} execution is not yet configured."
+        )
+
+    image, test_command = configuration
+
+    memory_limit = "768m" if runner == "go" else "512m"
+    workspace_limit = "384m" if runner == "go" else "128m"
+
+    name = f"forgepath-test-{uuid4().hex}"
+
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--name",
+        name,
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "64",
+        "--memory",
+        memory_limit,
+        "--cpus",
+        "1",
+        "--memory-swap",
+        memory_limit,
+        "--ulimit",
+        "nofile=256:256",
+        "--init",
+        "--user",
+        "65534:65534",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m,mode=1777",
+        "--tmpfs",
+        f"/work:rw,exec,nosuid,nodev,size={workspace_limit},mode=1777"
+        if runner == "go"
+        else f"/work:rw,nosuid,size={workspace_limit},mode=1777",
+        "--mount",
+        (
+            f"type=bind,source={snapshot.resolve()},"
+            "target=/source,readonly"
+        ),
+        "--workdir",
+        "/work",
+        "--env",
+        "CI=true",
+        "--env",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "--env",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+        image,
+        "/bin/sh",
+        "-c",
+        (
+            "cp -R /source/. /work/ && "
+            + test_command
+        ),
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            env=_docker_environment(),
+        )
+
+    except (OSError, FileNotFoundError) as exc:
+        raise SandboxError(
+            "Docker is unavailable; tests were not executed."
+        ) from exc
+
+    out = _Capture()
+    err = _Capture()
+
+    threads = [
+        threading.Thread(
+            target=out.consume,
+            args=(proc.stdout,),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=err.consume,
+            args=(proc.stderr,),
+            daemon=True,
+        ),
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    timed_out = False
+
+    try:
+        proc.wait(timeout=timeout_seconds)
+
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait(timeout=5)
+
+    finally:
+        cleanup_error = None
 
         try:
-            proc = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-                env=_docker_environment(),
-            )
+            _verify_container_cleanup(name)
 
-        except (OSError, FileNotFoundError) as exc:
-            raise SandboxError(
-                "Docker is unavailable; tests were not executed."
-            ) from exc
-
-        out = _Capture()
-        err = _Capture()
-
-        threads = [
-            threading.Thread(
-                target=out.consume,
-                args=(proc.stdout,),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=err.consume,
-                args=(proc.stderr,),
-                daemon=True,
-            ),
-        ]
+        except SandboxError as exc:
+            cleanup_error = exc
 
         for thread in threads:
-            thread.start()
+            thread.join(timeout=4)
 
-        timed_out = False
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
 
-        try:
-            proc.wait(timeout=timeout_seconds)
+        if cleanup_error is not None:
+            raise cleanup_error
 
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            proc.kill()
-            proc.wait(timeout=5)
-
-        finally:
-            cleanup_error = None
-
-            try:
-                _verify_container_cleanup(name)
-
-            except SandboxError as exc:
-                cleanup_error = exc
-
-            for thread in threads:
-                thread.join(timeout=4)
-
-            for stream in (proc.stdout, proc.stderr):
-                if stream is not None:
-                    stream.close()
-
-            if cleanup_error is not None:
-                raise cleanup_error
-
-        if not timed_out and proc.returncode in (125, 126, 127):
-            raise SandboxError(
-                "Docker failed to start or run the sandbox image."
-            )
-
-        return SandboxResult(
-            exit_code=None if timed_out else proc.returncode,
-            timed_out=timed_out,
-            stdout=out.text(),
-            stderr=err.text(),
-            stdout_truncated=out.truncated,
-            stderr_truncated=err.truncated,
+    if not timed_out and proc.returncode in (125, 126, 127):
+        raise SandboxError(
+            "Docker failed to start or run the sandbox image."
         )
+
+    return SandboxResult(
+        exit_code=None if timed_out else proc.returncode,
+        timed_out=timed_out,
+        stdout=out.text(),
+        stderr=err.text(),
+        stdout_truncated=out.truncated,
+        stderr_truncated=err.truncated,
+    )

@@ -261,6 +261,39 @@ Approval of a plan or patch never edits a file by itself. Local application requ
 - Patch application, rollback, test execution, connection tests, and other consequential actions require explicit authorization.
 - Do not expose PostgreSQL, pgAdmin, snapshot storage, Chroma, SQLite, or development servers to untrusted networks.
 
+## Isolated test execution
+
+ForgePath supports authorized test execution against saved,
+user-owned project snapshots using isolated Docker containers.
+
+Supported runners:
+
+- Python — pytest
+- JavaScript — npm test
+- Go — go test ./...
+
+Build the sandbox images:
+
+```powershell
+docker build -f sandbox/Dockerfile.pytest -t forgepath-pytest-sandbox:dev sandbox
+docker build -f sandbox/Dockerfile.npm -t forgepath-npm-sandbox:dev sandbox
+docker build -f sandbox/Dockerfile.go -t forgepath-go-sandbox:dev sandbox
+```
+
+Security features:
+
+- Explicit execution authorization.
+- Account and project isolation.
+- Disabled container networking.
+- Non-root execution.
+- Resource and execution time limits.
+- Automatic container cleanup.
+- No fallback to host execution.
+
+Currently supported in local development. Hosted execution
+requires a dedicated sandbox worker. External dependency
+provisioning is not yet supported.
+
 ## Tests and verification
 
 Run the isolated security/regression suite without loading `.env`, contacting providers, or executing subprocesses:

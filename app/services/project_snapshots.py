@@ -107,7 +107,10 @@ def _safe_path(relative_path: str) -> PurePosixPath:
         name.startswith(".") or name in _SKIP_FILENAMES or
         "secret" in name or "credential" in name or "private_key" in name or
         any(name.endswith(suffix) for suffix in _SKIP_SUFFIXES) or
-        path.suffix.casefold() not in LANGUAGE_BY_EXTENSION or
+        (
+            path.suffix.casefold() not in LANGUAGE_BY_EXTENSION
+            and path.name not in {"go.mod", "go.sum"}
+        ) or
         name.endswith((".min.js", ".min.css"))
     ):
         raise SnapshotValidationError("Sensitive or unsupported source filename")

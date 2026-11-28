@@ -1,0 +1,13 @@
+FROM node:24-alpine
+
+ENV CI=true \
+    HOME=/tmp \
+    NPM_CONFIG_CACHE=/tmp/npm-cache \
+    NPM_CONFIG_OFFLINE=true \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false
+
+WORKDIR /work
+
+USER 65534:65534
